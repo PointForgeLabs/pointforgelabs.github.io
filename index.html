@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Point Forge Labs</title>
+  <meta name="description" content="Point Forge Labs builds tools for bartenders, cocktail enthusiasts, and the people of New Orleans.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'DM Sans', sans-serif;
+      background: #011640;
+      color: #F2F2F2;
+      min-height: 100vh;
+    }
+
+    .hero {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 80px 24px 60px;
+      text-align: center;
+    }
+
+    .hero h1 {
+      font-family: 'Playfair Display', serif;
+      font-size: 3rem;
+      color: #BF8E34;
+      margin-bottom: 12px;
+      letter-spacing: -0.5px;
+    }
+
+    .hero .tagline {
+      font-size: 1.15rem;
+      color: rgba(242, 242, 242, 0.6);
+      margin-bottom: 60px;
+      line-height: 1.6;
+    }
+
+    .apps {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 32px;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 0 24px 80px;
+    }
+
+    @media (max-width: 600px) {
+      .apps { grid-template-columns: 1fr; }
+      .hero h1 { font-size: 2.2rem; }
+    }
+
+    .app-card {
+      background: #022840;
+      border: 1px solid rgba(191, 132, 59, 0.15);
+      border-radius: 16px;
+      padding: 36px 28px;
+      text-align: center;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+
+    .app-card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(191, 132, 59, 0.4);
+    }
+
+    .app-card .app-icon {
+      width: 72px;
+      height: 72px;
+      border-radius: 16px;
+      margin: 0 auto 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+    }
+
+    .app-card .app-icon.alchemixt {
+      background: linear-gradient(135deg, #BF8E34, #8B6914);
+    }
+
+    .app-card .app-icon.aintdere {
+      background: linear-gradient(135deg, #8B2635, #5A1420);
+    }
+
+    .app-card h2 {
+      font-family: 'Playfair Display', serif;
+      font-size: 1.5rem;
+      color: #F2F2F2;
+      margin-bottom: 8px;
+    }
+
+    .app-card .app-desc {
+      font-size: 0.95rem;
+      color: rgba(242, 242, 242, 0.5);
+      line-height: 1.6;
+      margin-bottom: 20px;
+    }
+
+    .app-card .badge {
+      display: inline-block;
+      padding: 6px 16px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+
+    .badge.coming-soon {
+      background: rgba(191, 132, 59, 0.15);
+      color: #BF8E34;
+    }
+
+    .footer {
+      text-align: center;
+      padding: 40px 24px;
+      border-top: 1px solid rgba(191, 132, 59, 0.1);
+    }
+
+    .footer-links {
+      margin-bottom: 16px;
+    }
+
+    .footer-links a {
+      color: rgba(242, 242, 242, 0.5);
+      text-decoration: none;
+      font-size: 0.9rem;
+      margin: 0 16px;
+      transition: color 0.2s;
+    }
+
+    .footer-links a:hover {
+      color: #BF8E34;
+    }
+
+    .footer .copyright {
+      font-size: 0.8rem;
+      color: rgba(242, 242, 242, 0.3);
+    }
+
+    .footer .location {
+      font-size: 0.85rem;
+      color: rgba(242, 242, 242, 0.4);
+      margin-bottom: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="hero">
+    <h1>Point Forge Labs</h1>
+    <p class="tagline">Building tools for bartenders, cocktail enthusiasts, and the people of New Orleans.</p>
+  </div>
+
+  <div class="apps">
+    <div class="app-card">
+      <div class="app-icon alchemixt">&#9878;</div>
+      <h2>Alchemixt</h2>
+      <p class="app-desc">A cocktail riff engine powered by flavor science. Generate structured variations on classic templates, explore compound affinities, and manage your bar program.</p>
+      <span class="badge coming-soon">Coming Soon</span>
+    </div>
+
+    <div class="app-card">
+      <div class="app-icon aintdere">&#9766;</div>
+      <h2>Ain't Dere No More</h2>
+      <p class="app-desc">A community-built archive of lost New Orleans. Bars, restaurants, music venues, and institutions that no longer exist &mdash; remembered by the people who loved them.</p>
+      <span class="badge coming-soon">Coming Soon</span>
+    </div>
+  </div>
+
+  <footer class="footer">
+    <p class="location">New Orleans, LA</p>
+    <div class="footer-links">
+      <a href="/privacy">Privacy Policy</a>
+      <a href="/support">Support</a>
+    </div>
+    <p class="copyright">&copy; 2026 Point Forge Labs. All rights reserved.</p>
+  </footer>
+</body>
+</html>
