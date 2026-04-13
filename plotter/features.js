@@ -107,3 +107,77 @@ function morphedShape(cx,cy,ang,w,hv,factor,shA,shB){
   return SHAPES[shB].f(cx,cy,ang,Math.max(1,wm),Math.max(.5,hm));
 }
 
+/* ===== NEW: Symmetry Transform ===== */
+function transformPath(pathStr,fn){return pathStr.replace(/([ML])\s*([-\d.]+)\s*,\s*([-\d.]+)/g,function(m,cmd,x,y){var pt=fn(parseFloat(x),parseFloat(y));return cmd+pt.x.toFixed(1)+","+pt.y.toFixed(1);});}
+function applySymmetry(shapes,mode,cW,cH){
+  if(mode==='none')return shapes;
+  var result=shapes.slice();var cx=cW/2,cy=cH/2;
+  if(mode==='mirror-x'){
+    for(var i=0,len=shapes.length;i<len;i++)result.push({p:transformPath(shapes[i].p,function(x,y){return{x:cW-x,y:y};}),c:shapes[i].c,fl:shapes[i].fl});
+  }else if(mode==='mirror-y'){
+    for(var i=0,len=shapes.length;i<len;i++)result.push({p:transformPath(shapes[i].p,function(x,y){return{x:x,y:cH-y};}),c:shapes[i].c,fl:shapes[i].fl});
+  }else if(mode==='mirror-xy'){
+    for(var i=0,len=shapes.length;i<len;i++){var s=shapes[i];
+      result.push({p:transformPath(s.p,function(x,y){return{x:cW-x,y:y};}),c:s.c,fl:s.fl});
+      result.push({p:transformPath(s.p,function(x,y){return{x:x,y:cH-y};}),c:s.c,fl:s.fl});
+      result.push({p:transformPath(s.p,function(x,y){return{x:cW-x,y:cH-y};}),c:s.c,fl:s.fl});}
+  }else{
+    var n=parseInt(mode);if(isNaN(n)||n<2)return result;
+    for(var k=1;k<n;k++){var angle=(k/n)*Math.PI*2,cosA=Math.cos(angle),sinA=Math.sin(angle);
+      for(var i=0,len=shapes.length;i<len;i++)result.push({p:transformPath(shapes[i].p,function(x,y){var dx=x-cx,dy=y-cy;return{x:cx+dx*cosA-dy*sinA,y:cy+dx*sinA+dy*cosA};}),c:shapes[i].c,fl:shapes[i].fl});}
+  }
+  return result;
+}
+var SYMMETRY_MODES=[{id:'none',n:'None'},{id:'mirror-x',n:'Mirror ↔'},{id:'mirror-y',n:'Mirror ↕'},{id:'mirror-xy',n:'Mirror ✦'},{id:'3',n:'3-Fold'},{id:'4',n:'4-Fold'},{id:'6',n:'6-Fold'},{id:'8',n:'8-Fold'}];
+
+/* ===== NEW: Spirograph Engine ===== */
+var SPIRO_PRESETS=[
+  {n:'Classic',R:1,r:.38,d:.6,loops:20},
+  {n:'Star Burst',R:1,r:.25,d:.9,loops:12},
+  {n:'Flower',R:1,r:.5,d:.5,loops:10},
+  {n:'Tight Weave',R:1,r:.15,d:.8,loops:30},
+  {n:'Petals',R:1,r:.33,d:1,loops:15},
+  {n:'Galaxy',R:1,r:.42,d:.3,loops:25}
+];
+function renderSpirograph(sp,cW,cH,shapeFn,colors,rng,shW,shH,fm){
+  var R=sp.R,r=sp.r,d=sp.d,iters=sp.iters||5000,loops=sp.loops||20;
+  var shapes=[],scale=Math.min(cW,cH)*.38,prev=null;
+  var isEpi=sp.epi;
+  for(var i=0;i<iters;i++){
+    var t=(i/iters)*Math.PI*2*loops;
+    var x,y;
+    if(isEpi){var sum=R+r;x=sum*Math.cos(t)-d*Math.cos(sum/r*t);y=sum*Math.sin(t)-d*Math.sin(sum/r*t);}
+    else{var diff=R-r;x=diff*Math.cos(t)+d*Math.cos(diff/r*t);y=diff*Math.sin(t)-d*Math.sin(diff/r*t);}
+    var sx=cW/2+x*scale,sy=cH/2+y*scale;
+    if(sx>2&&sx<cW-2&&sy>2&&sy<cH-2){
+      var ci=Math.floor((i/iters)*colors.length)%colors.length;
+      var ang=prev?Math.atan2(sy-prev.y,sx-prev.x):0;
+      var w=shW*(.5+rng()*.5),hv=shH*(.5+rng()*.5);
+      shapes.push({p:shapeFn(sx,sy,ang,Math.max(1,w),Math.max(.5,hv)),c:colors[ci],fl:fm!=='stroke'});
+    }
+    prev={x:sx,y:sy};
+  }
+  return shapes;
+}
+
+/* ===== NEW: Text to Paths ===== */
+function renderTextToImage(text,fontSize,fontFamily,cW,cH){
+  var cv=document.createElement('canvas');cv.width=cW;cv.height=cH;
+  var ctx=cv.getContext('2d');ctx.fillStyle='#000';ctx.fillRect(0,0,cW,cH);
+  ctx.fillStyle='#fff';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.font='bold '+fontSize+'px '+fontFamily;
+  /* Handle multi-line: split on newline */
+  var lines=text.split('\n');var lh=fontSize*1.15;var y0=cH/2-(lines.length-1)*lh/2;
+  for(var i=0;i<lines.length;i++)ctx.fillText(lines[i],cW/2,y0+i*lh);
+  /* Convert to image data compatible with processImage output */
+  var id=ctx.getImageData(0,0,cW,cH).data;var w=cW,h=cH;
+  var lum=new Float32Array(w*h);for(var i2=0;i2<w*h;i2++)lum[i2]=(0.299*id[i2*4]+0.587*id[i2*4+1]+0.114*id[i2*4+2])/255;
+  var gx=new Float32Array(w*h),gy=new Float32Array(w*h),em=new Float32Array(w*h);var mx=0;
+  for(var y=1;y<h-1;y++)for(var x=1;x<w-1;x++){var idx=y*w+x;
+    var sx=-lum[(y-1)*w+x-1]-2*lum[y*w+x-1]-lum[(y+1)*w+x-1]+lum[(y-1)*w+x+1]+2*lum[y*w+x+1]+lum[(y+1)*w+x+1];
+    var sy2=-lum[(y-1)*w+x-1]-2*lum[(y-1)*w+x]-lum[(y-1)*w+x+1]+lum[(y+1)*w+x-1]+2*lum[(y+1)*w+x]+lum[(y+1)*w+x+1];
+    gx[idx]=sx;gy[idx]=sy2;var mg=Math.sqrt(sx*sx+sy2*sy2);em[idx]=mg;if(mg>mx)mx=mg;}
+  if(mx>0)for(var i3=0;i3<w*h;i3++)em[i3]/=mx;
+  return{lum:lum,gx:gx,gy:gy,em:em,w:w,h:h};
+}
+

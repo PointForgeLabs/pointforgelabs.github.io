@@ -106,6 +106,23 @@ function PlotterStudio(){
   var _foFr=us(.5),foFr=_foFr[0],setFoFr=_foFr[1];
   var _foStr=us(.5),foStr=_foStr[0],setFoStr=_foStr[1];
 
+  /* NEW: Symmetry */
+  var _symMode=us('none'),symMode=_symMode[0],setSymMode=_symMode[1];
+
+  /* NEW: Spirograph */
+  var _spR=us(1),spR=_spR[0],setSpR=_spR[1];
+  var _spr=us(.38),spr=_spr[0],setSpr=_spr[1];
+  var _spD=us(.6),spD=_spD[0],setSpD=_spD[1];
+  var _spLoops=us(20),spLoops=_spLoops[0],setSpLoops=_spLoops[1];
+  var _spIters=us(5000),spIters=_spIters[0],setSpIters=_spIters[1];
+  var _spEpi=us(false),spEpi=_spEpi[0],setSpEpi=_spEpi[1];
+
+  /* NEW: Text */
+  var _txtVal=us('HELLO'),txtVal=_txtVal[0],setTxtVal=_txtVal[1];
+  var _txtSize=us(180),txtSize=_txtSize[0],setTxtSize=_txtSize[1];
+  var _txtFont=us('Arial Black'),txtFont=_txtFont[0],setTxtFont=_txtFont[1];
+  var _txtD=us(null),txtD=_txtD[0],setTxtD=_txtD[1];
+
   var pp=PAPERS[paper]||PAPERS['8x10'];
   var cW=orient==='landscape'?Math.max(pp.w,pp.h):Math.min(pp.w,pp.h);
   var cH=orient==='landscape'?Math.min(pp.w,pp.h):Math.max(pp.w,pp.h);
@@ -118,9 +135,21 @@ function PlotterStudio(){
   ue(function(){if(imgEl){var s=iRes/Math.max(imgEl.width,imgEl.height);setImgD(processImage(imgEl,Math.floor(imgEl.width*s),Math.floor(imgEl.height*s)));}},[iRes,imgEl]);
   ue(function(){if(cols.length<cCnt){var rng=makeRng(sd+77);setCols(function(p){return p.concat(genPal(bHue,harm,cCnt-p.length,rng)).slice(0,cCnt);});}else if(cols.length>cCnt)setCols(function(p){return p.slice(0,cCnt);});},[cCnt]);
 
+  /* Re-render text when text params or canvas size changes */
+  ue(function(){if(src==='text'&&txtVal.trim()){setTxtD(renderTextToImage(txtVal,txtSize,txtFont,Math.floor(cW*.5),Math.floor(cH*.5)));}},[txtVal,txtSize,txtFont,cW,cH,src]);
+
   var buildField=uc(function(){
     var mp={tw:tw,fr:fr,oc:oc,cx:fcx,cy:fcy,sd:sd};
     var mfn=function(nx,ny){return mathFields[mf](nx,ny,mp);};
+
+    /* Text source — uses text bitmap as image field */
+    if(src==='text'){
+      if(!txtD)return mfn;
+      var tip={mode:'edge',ew:1.2,bi:1,cb:1,ao:0};
+      var txtFn=function(nx,ny){return imgField(nx,ny,txtD,tip);};
+      if(foEn){var fop={tw:foTw,fr:foFr,oc:3,cx:0,cy:0,sd:sd};var f2=function(nx,ny){return mathFields[foField](nx,ny,fop);};return combineFields(txtFn,f2,foOp,foStr);}
+      return txtFn;
+    }
 
     /* Surface source */
     if(src==='surface3d'){
@@ -155,24 +184,32 @@ function PlotterStudio(){
       if(foEn){var fop={tw:foTw,fr:foFr,oc:3,cx:0,cy:0,sd:sd};var f2=mathFields[foField](nx,ny,fop);var b=f2;switch(foOp){case'add':return{a:blended.a+b.a*foStr,m:Math.min(1,blended.m+b.m*foStr)};case'multiply':return{a:blended.a*(1+b.a*foStr*.5),m:blended.m*(b.m*foStr+(1-foStr))};default:return{a:blended.a+Math.sin(b.a)*foStr*2,m:blended.m*(.5+b.m*.5)};}}
       return blended;
     };
-  },[src,mf,tw,fr,oc,fcx,fcy,sd,imgD,iMode,iEw,iBi,iCb,iAo,blendAmt,blMask,blFreq,foEn,foOp,foField,foTw,foFr,foStr,sfType,sfFreq,sfElev,sfDist,sfTwist]);
+  },[src,mf,tw,fr,oc,fcx,fcy,sd,imgD,iMode,iEw,iBi,iCb,iAo,blendAmt,blMask,blFreq,foEn,foOp,foField,foTw,foFr,foStr,sfType,sfFreq,sfElev,sfDist,sfTwist,txtD]);
 
   /* Main render effect */
   ue(function(){
     var rng=makeRng(sd);var shapes;
-    if(src==='attractor'){
+    if(src==='spirograph'){
+      var shapeFn=SHAPES[sh]?SHAPES[sh].f:sRect;
+      shapes=renderSpirograph({R:spR,r:spr,d:spD,iters:spIters,loops:spLoops,epi:spEpi},cW,cH,shapeFn,cols,rng,sw,sh2,fm);
+    }else if(src==='attractor'){
       var ap={p1:aP1,p2:aP2,p3:aP3,p4:aP4};
       var shapeFn=SHAPES[sh]?SHAPES[sh].f:sRect;
       shapes=renderAttractor(aType,ap,aIters,aDt,aScale,aRotX,aRotY,cW,cH,shapeFn,cols,rng,sw,sh2,fm,aSkip);
     }else{
       var fieldFn=buildField();var shapeFn=SHAPES[sh]?SHAPES[sh].f:sRect;
-      var tp={pc:pc,sl:sl,ms:ms,sw:sw,sh:sh2,ss:ss,sv:sv,jt:jt,mg:mg,sp:sp,fm:fm,df:(src!=='math'&&src!=='surface3d')?df:false,
+      var useDensity=(src!=='math'&&src!=='surface3d');
+      var tp={pc:pc,sl:sl,ms:ms,sw:sw,sh:sh2,ss:ss,sv:sv,jt:jt,mg:mg,sp:sp,fm:fm,df:useDensity?df:false,
         phEn:phEn,phRep:phRep,phIters:phIters,phGrav:phGrav,phGravX:phGravX,phGravY:phGravY,phGravStr:phGravStr,
         isSurf:src==='surface3d',sfElev:sfElev,sfDist:sfDist};
       var maskCfg=mkEn?{en:true,type:mkType,cx:mkCx,cy:mkCy,rad:mkRad,freq:mkFreq,thresh:mkThresh,inv:mkInv,seed:sd}:null;
+      /* For text source, add text bitmap as density mask so particles fill the text */
+      if(src==='text'&&txtD&&!mkEn){tp.df=true;}
       var morphCfg=moEn?{en:true,shA:sh,shB:moEnd,mode:moMode}:null;
       shapes=doTrace(fieldFn,tp,cW,cH,rng,shapeFn,cols,maskCfg,morphCfg);
     }
+    /* Apply symmetry */
+    if(symMode!=='none')shapes=applySymmetry(shapes,symMode,cW,cH);
     dataRef.current=shapes;
 
     var cv=canvasRef.current;if(!cv)return;
@@ -191,7 +228,8 @@ function PlotterStudio(){
     aType,aIters,aDt,aScale,aRotX,aRotY,aP1,aP2,aP3,aP4,aSkip,
     sfType,sfFreq,sfElev,sfDist,sfTwist,
     mkEn,mkType,mkCx,mkCy,mkRad,mkFreq,mkThresh,mkInv,
-    moEn,moEnd,moMode,phEn,phRep,phIters,phGrav,phGravX,phGravY,phGravStr]);
+    moEn,moEnd,moMode,phEn,phRep,phIters,phGrav,phGravX,phGravY,phGravStr,
+    symMode,spR,spr,spD,spLoops,spIters,spEpi,txtD]);
 
   function exportSVG(plotter){
     var shapes=dataRef.current;var body='';
@@ -219,7 +257,7 @@ function PlotterStudio(){
   var fieldTab=h(React.Fragment,null,
     h(Lbl,null,"Source"),
     h("div",{style:{display:'flex',gap:3,marginBottom:8,flexWrap:'wrap'}},
-      [['math','Math'],['image','Image'],['blend','Blend'],['attractor','Attractor'],['surface3d','3D Surface']].map(function(e){return h("button",{key:e[0],onClick:function(){setSrc(e[0]);},style:src===e[0]?ba:b},e[1]);})
+      [['math','Math'],['image','Image'],['blend','Blend'],['attractor','Attractor'],['surface3d','3D Surface'],['spirograph','Spirograph'],['text','Text']].map(function(e){return h("button",{key:e[0],onClick:function(){setSrc(e[0]);},style:src===e[0]?ba:b},e[1]);})
     ),
 
     /* Attractor controls */
@@ -255,6 +293,37 @@ function PlotterStudio(){
       h(Lbl,null,"Perspective"),
       h(Sl,{l:"Elevation",v:sfElev,min:0,max:1.5,step:.05,set:setSfElev}),
       h(Sl,{l:"Distance",v:sfDist,min:.5,max:5,step:.1,set:setSfDist})
+    ):null,
+
+    /* Spirograph controls */
+    src==='spirograph'?h(React.Fragment,null,
+      h(Lbl,null,"Presets"),
+      h("div",{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:2,marginBottom:6}},
+        SPIRO_PRESETS.map(function(p){return h("button",{key:p.n,onClick:function(){setSpR(p.R);setSpr(p.r);setSpD(p.d);setSpLoops(p.loops);},style:bSm},p.n);})
+      ),
+      h(Lbl,null,"Type"),
+      h("div",{style:{display:'flex',gap:3,marginBottom:6}},
+        h("button",{onClick:function(){setSpEpi(false);},style:spEpi?b:ba},"Hypotrochoid"),
+        h("button",{onClick:function(){setSpEpi(true);},style:spEpi?ba:b},"Epitrochoid")
+      ),
+      h(Lbl,null,"Parameters"),
+      h(Sl,{l:"Outer R",v:spR,min:.2,max:2,step:.02,set:setSpR}),
+      h(Sl,{l:"Inner r",v:spr,min:.05,max:1,step:.01,set:setSpr}),
+      h(Sl,{l:"Pen Dist",v:spD,min:.05,max:1.5,step:.02,set:setSpD}),
+      h(Sl,{l:"Loops",v:spLoops,min:2,max:60,set:setSpLoops}),
+      h(Sl,{l:"Points",v:spIters,min:500,max:20000,step:500,set:setSpIters})
+    ):null,
+
+    /* Text controls */
+    src==='text'?h(React.Fragment,null,
+      h(Lbl,null,"Text"),
+      h("input",{type:"text",value:txtVal,onChange:function(e){setTxtVal(e.target.value);},style:{width:'100%',padding:'6px 8px',background:'#141414',border:'1px solid #333',color:'#ccc',fontFamily:'inherit',fontSize:13,marginBottom:6,boxSizing:'border-box'}}),
+      h(Sl,{l:"Font Size",v:txtSize,min:40,max:400,step:5,set:setTxtSize}),
+      h(Lbl,null,"Font"),
+      h("div",{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:2,marginBottom:6}},
+        ['Arial Black','Georgia','Impact','Courier New','Comic Sans MS','Times New Roman'].map(function(f){return h("button",{key:f,onClick:function(){setTxtFont(f);},style:Object.assign({},txtFont===f?baSm:bSm,{fontSize:8})},f);})
+      ),
+      h("p",{style:{fontSize:9,color:'#444',lineHeight:1.5,marginTop:4}},"Text is rendered as a flow field. Particles trace through the letter shapes. Try different math field operators!")
     ):null,
 
     /* Math field controls */
@@ -350,6 +419,11 @@ function PlotterStudio(){
         ['magnitude','distance','angle'].map(function(m){return h("button",{key:m,onClick:function(){setMoMode(m);},style:Object.assign({},moMode===m?ba:b,{textTransform:'capitalize',fontSize:9})},m);})
       )
     ):null,
+
+    h(Lbl,null,"Symmetry"),
+    h("div",{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:2,marginBottom:6}},
+      SYMMETRY_MODES.map(function(m){return h("button",{key:m.id,onClick:function(){setSymMode(m.id);},style:symMode===m.id?baSm:bSm},m.n);})
+    ),
 
     h(Lbl,null,"Render"),
     h("div",{style:{display:'flex',gap:3,marginBottom:6}},
