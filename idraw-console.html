@@ -112,7 +112,7 @@
       </div>
       <div>
         <div class="row"><label class="f">steps/mm <input id="stepsPerMm" type="number" value="80" min="1" step="0.01"></label></div>
-        <p class="hint" style="max-width:230px">Default 80 (AxiDraw 1/16 µstep). Calibrate: jog a known distance, measure travel, adjust until the number matches reality. <span class="danger">Move slowly and keep a hand on STOP the first time — direction/orientation may differ on your machine.</span></p>
+        <p class="hint" style="max-width:230px">iDraw H SE = 0.0125 mm/step = <b>80 steps/mm</b> (spec-confirmed) and CoreXY — so this is already correct; you only need to verify <i>direction</i>. <span class="danger">Move slowly with a hand on STOP the first time. If X+ moves diagonally or the wrong way, tell me and I'll flip the CoreXY signs.</span></p>
       </div>
     </div>
 
@@ -138,6 +138,9 @@ let port=null, writer=null, reader=null, readLoopAbort=false;
 let rxBuf="";                 // accumulates incoming text, split on CR/LF
 let ctype="";                 // 'ebb' | 'grbl' | ''
 const enc = new TextEncoder();
+// iDraw H SE A2 confirmed specs: EBB (DrawCore V1.3), CoreXY, 0.0125 mm/step = 80 steps/mm,
+// drawing area 420x594 mm, max 12000 mm/min (200 mm/s). Servo brush heights are per-brush, not fixed.
+const MACHINE = { stepsPerMm:80, areaMm:[594,420], maxSpeedMmS:200, kinematics:"corexy" };
 
 /* ---------- logging ---------- */
 function log(msg, cls="sys"){
