@@ -93,6 +93,9 @@
       <span id="zVal" class="val">40%</span>
       <button id="zApply" disabled>Set down-height &amp; lower</button>
     </div>
+    <div class="row">
+      <label class="f"><input type="checkbox" id="zInvert"> Invert up/down (flip if Pen UP lowers the brush)</label>
+    </div>
     <p class="hint">Lowering the brush further (higher %) splays the bristles = wider, wetter mark. Find your paper-touch and well-bottom heights here — these become the calibration the painting engine needs. <span id="zUnits" class="sys"></span></p>
 
     <!-- Jog -->
@@ -250,13 +253,15 @@ $("forceType").onchange = async (e)=>{
 /* EBB: set conservative default servo up/down positions so Pen Up/Down behave predictably.
    Positions are in EBB servo units (~83.3 ns); ~9855..27831 is the usual safe pen band. */
 const Z_MIN=9855, Z_MAX=27831;       // 0%..100% of the documented pen band
-function zPctToRaw(p){ return Math.round(Z_MIN + (Z_MAX-Z_MIN)*p/100); }
+// height% convention: higher % = brush LOWER (more pressed). Invert flips polarity for machines wired the other way.
+function rawForPct(p){ const q = $("zInvert").checked ? (100-p) : p; return Math.round(Z_MIN + (Z_MAX-Z_MIN)*q/100); }
 async function ebbInit(){
-  await sendCmd("SC,4,"+zPctToRaw(20));   // pen-up position (raise)
-  await sendCmd("SC,5,"+zPctToRaw(45));   // pen-down position (default touch)
-  log("EBB servo band initialised (up≈20%, down≈45%) — calibrate with the slider","sys");
+  await sendCmd("SC,4,"+rawForPct(5));    // pen-up position (raised)
+  await sendCmd("SC,5,"+rawForPct(45));   // pen-down position (default touch)
+  log("EBB servo band set (up≈raised, down≈45%)"+($("zInvert").checked?" [inverted]":"")+" — calibrate with the slider","sys");
   $("zUnits").textContent = `(raw band ${Z_MIN}–${Z_MAX})`;
 }
+$("zInvert").onchange = ()=>{ log("Z invert "+($("zInvert").checked?"ON":"OFF"),"sys"); if(ctype==="ebb" && port) ebbInit(); };
 
 /* ---------- UI state ---------- */
 function setConnected(on){
@@ -303,7 +308,7 @@ $("zRange").addEventListener("input", e=>{ $("zVal").textContent = e.target.valu
 $("zApply").onclick = async ()=>{
   const p=+$("zRange").value;
   if(ctype==="grbl"){ log("On GRBL, brush height depends on firmware — edit the pen-down command (e.g. M3 Sxxx).","sys"); return; }
-  await sendCmd("SC,5,"+zPctToRaw(p));   // set pen-down position
+  await sendCmd("SC,5,"+rawForPct(p));   // set pen-down position
   await sendCmd("SP,0");                  // lower to it
   log(`brush set to ${p}% (raw ${zPctToRaw(p)}) and lowered`,"sys");
 };
