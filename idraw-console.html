@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iDraw Console — direct USB control (Web Serial)</title>
+<style>
+  :root{--bg:#14171c;--panel:#1c2128;--panel2:#232a33;--ink:#e6edf3;--ink2:#8b97a5;--accent:#4ea1ff;--ok:#3fb950;--warn:#d29922;--err:#f85149;--line:#2d333b}
+  *{box-sizing:border-box}
+  body{margin:0;font:13px/1.45 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+  header{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  header h1{font-size:15px;margin:0;font-weight:600}
+  .pill{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--line);color:var(--ink2)}
+  .pill.on{color:var(--ok);border-color:var(--ok)}
+  .pill.bad{color:var(--err);border-color:var(--err)}
+  main{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:14px;max-width:1100px}
+  @media(max-width:780px){main{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}
+  .panel h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink2);margin:0 0 10px}
+  button{font:inherit;background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 11px;cursor:pointer}
+  button:hover:not(:disabled){border-color:var(--accent)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#06121f;font-weight:600}
+  button.stop{background:var(--err);border-color:var(--err);color:#fff;font-weight:700}
+  button.stop:hover{filter:brightness(1.1)}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}
+  label.f{display:inline-flex;align-items:center;gap:5px;color:var(--ink2)}
+  input[type=number],input[type=text]{font:inherit;background:#0e1116;color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:5px 7px;width:80px}
+  input[type=text].wide{width:100%;flex:1}
+  input[type=range]{flex:1;min-width:120px}
+  #log{font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;background:#0e1116;border:1px solid var(--line);border-radius:6px;height:300px;overflow:auto;padding:8px;white-space:pre-wrap;word-break:break-word}
+  .tx{color:var(--accent)} .rx{color:var(--ok)} .sys{color:var(--ink2)} .er{color:var(--err)}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;max-width:180px}
+  .grid3 button{padding:8px 0}
+  .hint{color:var(--ink2);font-size:11px;margin:8px 0 0}
+  .danger{color:var(--warn)}
+  code{background:#0e1116;padding:1px 5px;border-radius:4px;border:1px solid var(--line)}
+  .sec-dim{opacity:.5;pointer-events:none}
+  .val{font-variant-numeric:tabular-nums;color:var(--ink2);min-width:54px;display:inline-block;text-align:right}
+</style>
+</head>
+<body>
+<header>
+  <h1>iDraw Console</h1>
+  <span id="connPill" class="pill">disconnected</span>
+  <span id="typePill" class="pill">controller: unknown</span>
+  <span style="flex:1"></span>
+  <button id="connectBtn" class="primary">Connect USB…</button>
+  <button id="disconnectBtn" disabled>Disconnect</button>
+  <button id="stopBtn" class="stop" disabled>■ STOP</button>
+</header>
+
+<main>
+  <!-- LEFT: log + raw -->
+  <section class="panel">
+    <h2>Serial log</h2>
+    <div id="log"></div>
+    <div class="row" style="margin-top:8px">
+      <input id="rawCmd" type="text" class="wide" placeholder="raw command (sent verbatim + CR)  e.g.  V   or   QS" disabled>
+      <button id="rawSend" disabled>Send</button>
+      <button id="clearLog">Clear</button>
+    </div>
+    <p class="hint">Auto-detect probes the board with harmless queries on connect (no motion). EBB answers a version string; GRBL sends a <code>Grbl</code> banner. Detection result is shown above — override below if it guesses wrong.</p>
+    <div class="row">
+      <label class="f">Force type:
+        <select id="forceType">
+          <option value="">(use auto-detect)</option>
+          <option value="ebb">EBB / EiBotBoard</option>
+          <option value="grbl">GRBL</option>
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <!-- RIGHT: controls -->
+  <section class="panel" id="ctrlPanel">
+    <h2>Manual control <span id="ctrlType" class="pill">—</span></h2>
+
+    <!-- Motors / pen -->
+    <div class="row">
+      <button id="motorsOn" disabled>Enable motors</button>
+      <button id="motorsOff" disabled>Disable motors</button>
+    </div>
+    <div class="row">
+      <button id="penUp" disabled>Pen / brush UP</button>
+      <button id="penDown" disabled>Pen / brush DOWN</button>
+    </div>
+
+    <!-- Brush height (Z) -->
+    <h2 style="margin-top:14px">Brush height (Z servo)</h2>
+    <div class="row">
+      <input id="zRange" type="range" min="0" max="100" value="40" disabled>
+      <span id="zVal" class="val">40%</span>
+      <button id="zApply" disabled>Set down-height &amp; lower</button>
+    </div>
+    <p class="hint">Lowering the brush further (higher %) splays the bristles = wider, wetter mark. Find your paper-touch and well-bottom heights here — these become the calibration the painting engine needs. <span id="zUnits" class="sys"></span></p>
+
+    <!-- Jog -->
+    <h2 style="margin-top:14px">Jog</h2>
+    <div class="row">
+      <label class="f">Step <select id="jogDist"><option>1</option><option selected>5</option><option>10</option><option>25</option></select> mm</label>
+      <label class="f">Speed <input id="jogSpeed" type="number" value="20" min="2" max="120"> mm/s</label>
+    </div>
+    <div class="row" style="align-items:flex-start;gap:18px">
+      <div class="grid3">
+        <span></span><button id="jYp" disabled>Y+</button><span></span>
+        <button id="jXm" disabled>X−</button><button id="jHome" disabled title="set current position as origin">⌂</button><button id="jXp" disabled>X+</button>
+        <span></span><button id="jYm" disabled>Y−</button><span></span>
+      </div>
+      <div>
+        <div class="row"><label class="f">steps/mm <input id="stepsPerMm" type="number" value="80" min="1" step="0.01"></label></div>
+        <p class="hint" style="max-width:230px">Default 80 (AxiDraw 1/16 µstep). Calibrate: jog a known distance, measure travel, adjust until the number matches reality. <span class="danger">Move slowly and keep a hand on STOP the first time — direction/orientation may differ on your machine.</span></p>
+      </div>
+    </div>
+
+    <!-- GRBL pen command overrides -->
+    <div id="grblExtra" class="row" style="display:none">
+      <label class="f">GRBL pen-up cmd <input id="grblUp" type="text" value="M5" style="width:110px"></label>
+      <label class="f">pen-down cmd <input id="grblDown" type="text" value="M3 S1000" style="width:130px"></label>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+/* iDraw Console — direct USB control via the Web Serial API.
+   Stage 1 (this file): connect, auto-detect controller, and SAFE manual control
+   + calibration (steps/mm, servo Z range). No automatic motion on connect.
+   Once the machine is confirmed here, the plotting + dip/refill engine gets built
+   on this same transport. Tested target: Chrome/Edge desktop. */
+
+const $ = id => document.getElementById(id);
+const logEl = $("log");
+let port=null, writer=null, reader=null, readLoopAbort=false;
+let rxBuf="";                 // accumulates incoming text, split on CR/LF
+let ctype="";                 // 'ebb' | 'grbl' | ''
+const enc = new TextEncoder();
+
+/* ---------- logging ---------- */
+function log(msg, cls="sys"){
+  const t = new Date().toLocaleTimeString();
+  const div = document.createElement("div");
+  div.className = cls;
+  div.textContent = `${t}  ${msg}`;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+$("clearLog").onclick = ()=>{ logEl.innerHTML=""; };
+
+/* ---------- low-level serial ---------- */
+async function writeRaw(str){
+  if(!writer){ log("not connected","er"); return; }
+  await writer.write(enc.encode(str));
+  log("» "+str.replace(/\r/g,"\\r").replace(/\n/g,"\\n"), "tx");
+}
+// EBB & GRBL are both line oriented; EBB wants CR, GRBL wants LF. CRLF satisfies both.
+async function sendCmd(str){ await writeRaw(str + "\r\n"); }
+
+async function readLoop(){
+  const dec = new TextDecoder();
+  try{
+    while(!readLoopAbort){
+      const {value, done} = await reader.read();
+      if(done) break;
+      if(value && value.length){
+        rxBuf += dec.decode(value, {stream:true});
+        let i;
+        while((i = rxBuf.search(/[\r\n]/)) >= 0){
+          const line = rxBuf.slice(0,i).trim();
+          rxBuf = rxBuf.slice(i+1);
+          if(line) log("« "+line, line.toLowerCase().startsWith("error")||line.toLowerCase().startsWith("alarm") ? "er":"rx");
+          handleLine(line);
+        }
+      }
+    }
+  }catch(e){ if(!readLoopAbort) log("read error: "+e.message,"er"); }
+}
+
+let lastLines=[];
+function handleLine(line){
+  if(!line) return;
+  lastLines.push(line); if(lastLines.length>40) lastLines.shift();
+}
+
+/* ---------- connect / disconnect ---------- */
+$("connectBtn").onclick = async ()=>{
+  if(!("serial" in navigator)){
+    log("Web Serial not available. Use Chrome or Edge on desktop, served over https:// or localhost.","er");
+    alert("This browser has no Web Serial API. Use Chrome or Edge on desktop.");
+    return;
+  }
+  try{
+    port = await navigator.serial.requestPort();   // user picks the device
+    await port.open({ baudRate: 115200 });          // EBB ignores baud (USB CDC); GRBL commonly 115200
+    writer = port.writable.getWriter();
+    reader = port.readable.getReader();
+    readLoopAbort=false; readLoop();
+    setConnected(true);
+    log("port opened","sys");
+    await detect();
+  }catch(e){
+    log("connect failed: "+e.message,"er");
+  }
+};
+
+async function closePort(){
+  readLoopAbort=true;
+  try{ if(reader){ await reader.cancel(); reader.releaseLock(); } }catch(e){}
+  try{ if(writer){ writer.releaseLock(); } }catch(e){}
+  try{ if(port){ await port.close(); } }catch(e){}
+  reader=writer=port=null;
+}
+$("disconnectBtn").onclick = async ()=>{ await closePort(); setConnected(false); log("disconnected","sys"); };
+navigator.serial && navigator.serial.addEventListener && navigator.serial.addEventListener("disconnect", ()=>{
+  if(port){ setConnected(false); log("device unplugged","er"); }
+});
+
+/* ---------- auto-detect ---------- */
+async function detect(){
+  setType("");
+  log("probing controller (no motion)…","sys");
+  lastLines=[];
+  // EBB probe: 'V' returns a version string. Harmless to GRBL (it just errors).
+  await sendCmd("V");
+  await sleep(400);
+  const joined = lastLines.join(" ").toLowerCase();
+  if(joined.includes("ebb") || joined.includes("firmware") || /v\d+\.\d+/.test(joined)){
+    setType("ebb"); log("detected: EBB / EiBotBoard","sys"); await ebbInit(); return;
+  }
+  // GRBL probe: soft-reset (Ctrl-X) makes GRBL print its banner; '$I' asks build info.
+  lastLines=[];
+  await writeRaw("\x18");      // GRBL soft reset
+  await sleep(300);
+  await sendCmd("$I");
+  await sleep(400);
+  const j2 = lastLines.join(" ").toLowerCase();
+  if(j2.includes("grbl")){ setType("grbl"); log("detected: GRBL","sys"); return; }
+  log("could not auto-detect. Use 'Force type' to choose, then re-try a command.","er");
+}
+
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+$("forceType").onchange = async (e)=>{
+  const v=e.target.value;
+  if(!v){ return; }
+  setType(v); log("controller forced to "+v.toUpperCase(),"sys");
+  if(v==="ebb" && port) await ebbInit();
+};
+
+/* EBB: set conservative default servo up/down positions so Pen Up/Down behave predictably.
+   Positions are in EBB servo units (~83.3 ns); ~9855..27831 is the usual safe pen band. */
+const Z_MIN=9855, Z_MAX=27831;       // 0%..100% of the documented pen band
+function zPctToRaw(p){ return Math.round(Z_MIN + (Z_MAX-Z_MIN)*p/100); }
+async function ebbInit(){
+  await sendCmd("SC,4,"+zPctToRaw(20));   // pen-up position (raise)
+  await sendCmd("SC,5,"+zPctToRaw(45));   // pen-down position (default touch)
+  log("EBB servo band initialised (up≈20%, down≈45%) — calibrate with the slider","sys");
+  $("zUnits").textContent = `(raw band ${Z_MIN}–${Z_MAX})`;
+}
+
+/* ---------- UI state ---------- */
+function setConnected(on){
+  $("connPill").textContent = on?"connected":"disconnected";
+  $("connPill").className = "pill"+(on?" on":"");
+  $("connectBtn").disabled = on;
+  ["disconnectBtn","stopBtn","rawCmd","rawSend"].forEach(id=>$(id).disabled=!on);
+  enableControls(on);
+  if(!on){ setType(""); }
+}
+function setType(t){
+  ctype=t;
+  $("typePill").textContent = "controller: "+(t?t.toUpperCase():"unknown");
+  $("typePill").className = "pill"+(t?" on":"");
+  $("ctrlType").textContent = t?t.toUpperCase():"—";
+  $("grblExtra").style.display = t==="grbl"?"flex":"none";
+}
+function enableControls(on){
+  ["motorsOn","motorsOff","penUp","penDown","zRange","zApply",
+   "jYp","jYm","jXp","jXm","jHome"].forEach(id=>$(id).disabled=!on);
+}
+
+/* ---------- raw send ---------- */
+$("rawSend").onclick = ()=>{ const v=$("rawCmd").value.trim(); if(v){ sendCmd(v); $("rawCmd").value=""; } };
+$("rawCmd").addEventListener("keydown", e=>{ if(e.key==="Enter") $("rawSend").click(); });
+
+/* ---------- STOP ---------- */
+$("stopBtn").onclick = async ()=>{
+  log("STOP pressed","er");
+  if(ctype==="grbl"){ await writeRaw("\x18"); }      // soft reset
+  else { await sendCmd("ES"); await sendCmd("EM,0,0"); } // EBB e-stop + disable motors
+};
+
+/* ---------- motors ---------- */
+$("motorsOn").onclick = ()=> ctype==="grbl" ? sendCmd("$X") : sendCmd("EM,1,1");
+$("motorsOff").onclick = ()=> ctype==="grbl" ? sendCmd("$SLP") : sendCmd("EM,0,0");
+
+/* ---------- pen / brush up-down ---------- */
+$("penUp").onclick = ()=> ctype==="grbl" ? sendCmd($("grblUp").value) : sendCmd("SP,1");
+$("penDown").onclick = ()=> ctype==="grbl" ? sendCmd($("grblDown").value) : sendCmd("SP,0");
+
+/* ---------- brush height slider ---------- */
+$("zRange").addEventListener("input", e=>{ $("zVal").textContent = e.target.value+"%"; });
+$("zApply").onclick = async ()=>{
+  const p=+$("zRange").value;
+  if(ctype==="grbl"){ log("On GRBL, brush height depends on firmware — edit the pen-down command (e.g. M3 Sxxx).","sys"); return; }
+  await sendCmd("SC,5,"+zPctToRaw(p));   // set pen-down position
+  await sendCmd("SP,0");                  // lower to it
+  log(`brush set to ${p}% (raw ${zPctToRaw(p)}) and lowered`,"sys");
+};
+
+/* ---------- jog ----------
+   AxiDraw/EBB is CoreXY: physical motor steps relate to cartesian by
+   m1 = dx + dy, m2 = dx - dy. SM,duration_ms,m1,m2 moves both motors.
+   GRBL: relative jog via $J. Direction/orientation is machine-specific — calibrate. */
+function jogSteps(){ return (+$("jogDist").value) * (+$("stepsPerMm").value); }
+function jogDurMs(distMm){ const v=Math.max(2,+$("jogSpeed").value); return Math.max(30, Math.round(distMm/v*1000)); }
+async function ebbJog(dx,dy){
+  const s = jogSteps();
+  const dist = +$("jogDist").value;
+  const m1 = Math.round((dx+dy)*s), m2 = Math.round((dx-dy)*s);
+  await sendCmd(`SM,${jogDurMs(dist)},${m1},${m2}`);
+}
+async function grblJog(dx,dy){
+  const d=+$("jogDist").value, f=Math.max(2,+$("jogSpeed").value)*60; // mm/min
+  await sendCmd(`$J=G91 G21 X${(dx*d).toFixed(3)} Y${(dy*d).toFixed(3)} F${f}`);
+}
+function jog(dx,dy){ ctype==="grbl" ? grblJog(dx,dy) : ebbJog(dx,dy); }
+$("jXp").onclick=()=>jog( 1, 0);
+$("jXm").onclick=()=>jog(-1, 0);
+$("jYp").onclick=()=>jog( 0, 1);
+$("jYm").onclick=()=>jog( 0,-1);
+$("jHome").onclick=async ()=>{
+  // "set current position as origin" — EBB: clear step counters; GRBL: G92 zero.
+  if(ctype==="grbl"){ await sendCmd("G92 X0 Y0"); }
+  else { await sendCmd("CS"); }  // EBB clear step position
+  log("current position set as origin","sys");
+};
+
+log("Ready. Click 'Connect USB…', pick the iDraw, and it will auto-detect.","sys");
+log("Safety: motors start disabled; nothing moves until you press a button. Keep STOP within reach on the first jog.","sys");
+</script>
+</body>
+</html>
