@@ -122,6 +122,40 @@
       <label class="f">pen-down cmd <input id="grblDown" type="text" value="M3 S1000" style="width:130px"></label>
     </div>
   </section>
+
+  <!-- PLOT (stage 2) -->
+  <section class="panel" style="grid-column:1/-1">
+    <h2>Plot <span class="pill">stage 2 · EBB</span></h2>
+    <div class="row">
+      <label class="f">Draw speed <input id="drawSpeed" type="number" value="25" min="2" max="120"> mm/s</label>
+      <label class="f">Travel speed <input id="travelSpeed" type="number" value="70" min="5" max="200"> mm/s</label>
+      <label class="f">Pen-up % <input id="penUpPct" type="number" value="5" min="0" max="100"></label>
+      <label class="f">Pen-down % <input id="penDownPct" type="number" value="45" min="0" max="100"></label>
+      <label class="f">Margin <input id="plotMargin" type="number" value="15" min="0" max="100"> mm</label>
+    </div>
+    <div class="row">
+      <label class="f"><input type="checkbox" id="invX"> Invert X</label>
+      <label class="f"><input type="checkbox" id="invY"> Invert Y</label>
+      <label class="f"><input type="checkbox" id="swapXY"> Swap X/Y</label>
+      <span class="sys">Use these to fix mirrored/rotated output without re-plotting blind.</span>
+    </div>
+    <div class="row">
+      <button id="plotSquare" disabled title="50mm square + diagonal + 10mm tick near origin — confirms direction, scale, and pen in one go">▶ Plot test square (do this first)</button>
+      <button id="plotPause" disabled>Pause</button>
+      <button id="plotResume" disabled>Resume</button>
+      <span id="plotStatus" class="val" style="min-width:160px;text-align:left"></span>
+    </div>
+    <h2 style="margin-top:14px">Plot an SVG</h2>
+    <div class="row">
+      <textarea id="svgText" class="wide" rows="3" placeholder="Paste SVG markup here (paths/lines/polylines/circles), or use the file picker →" style="font:12px ui-monospace,monospace;background:#0e1116;color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:6px;resize:vertical"></textarea>
+    </div>
+    <div class="row">
+      <input id="svgFile" type="file" accept=".svg,image/svg+xml">
+      <button id="plotSvg" disabled>▶ Plot SVG (fit to bed)</button>
+      <span class="sys">Fits to the A2 bed inside the margin, preserving aspect. Test the square first.</span>
+    </div>
+    <p class="hint">Motion is paced per-segment (slightly stuttery but accurate) — smooth look-ahead planning comes later. The bed is treated as <b>594 × 420 mm</b>; anything outside is rejected before moving. Position the brush at the <b>top-left start corner</b> and set origin (⌂) before plotting.</p>
+  </section>
 </main>
 
 <script>
@@ -344,8 +378,162 @@ $("jHome").onclick=async ()=>{
   log("current position set as origin","sys");
 };
 
+/* ============================ PLOT ENGINE (stage 2, EBB) ============================
+   Streams polylines (mm) to the EBB as CoreXY SM moves. Per-segment pacing (await each
+   move's duration) keeps the EBB FIFO from overflowing — accurate, slightly stuttery.
+   Smooth look-ahead planning is a later upgrade. */
+let plotting=false, plotPaused=false, plotAbort=false;
+let posX=0, posY=0, accM1=0, accM2=0;   // mm position from origin + committed motor steps
+
+function orientSets(sets){
+  // apply Invert X / Invert Y / Swap, then translate so the design sits at +margin on the bed
+  const ix=$("invX").checked, iy=$("invY").checked, sw=$("swapXY").checked;
+  let minX=Infinity,minY=Infinity;
+  const out=sets.map(pl=>pl.map(([x,y])=>{
+    let nx=ix?-x:x, ny=iy?-y:y; if(sw){const t=nx;nx=ny;ny=t;}
+    if(nx<minX)minX=nx; if(ny<minY)minY=ny; return [nx,ny];
+  }));
+  const m=+$("plotMargin").value||0;
+  out.forEach(pl=>pl.forEach(p=>{ p[0]+=m-minX; p[1]+=m-minY; }));
+  return out;
+}
+function bbox(sets){let a=[Infinity,Infinity],b=[-Infinity,-Infinity];
+  sets.forEach(pl=>pl.forEach(([x,y])=>{a[0]=Math.min(a[0],x);a[1]=Math.min(a[1],y);b[0]=Math.max(b[0],x);b[1]=Math.max(b[1],y);}));
+  return {min:a,max:b};}
+
+async function emitMove(x,y,draw){
+  // absolute CoreXY motor targets (m1=x+y, m2=x-y) → step deltas
+  const spmm=+$("stepsPerMm").value||80;
+  const tM1=Math.round((x+y)*spmm), tM2=Math.round((x-y)*spmm);
+  const d1=tM1-accM1, d2=tM2-accM2;
+  const L=Math.hypot(x-posX,y-posY);
+  const sp=(draw?(+$("drawSpeed").value):(+$("travelSpeed").value))||25;
+  const dur=Math.max(1,Math.round(L/sp*1000));
+  if(d1!==0||d2!==0){ await sendCmd(`SM,${dur},${d1},${d2}`); await sleep(dur); }
+  accM1=tM1; accM2=tM2; posX=x; posY=y;
+}
+async function penTo(down){
+  await sendCmd(down?"SP,0":"SP,1");
+  await sleep(down?420:260);   // let the servo settle before moving
+}
+async function plotSets(rawSets,label){
+  if(plotting){ log("already plotting","er"); return; }
+  const sets = orientSets(rawSets).map(pl=>pl).filter(pl=>pl.length>=2);
+  const bb=bbox(sets);
+  if(bb.min[0]<-0.01||bb.min[1]<-0.01||bb.max[0]>MACHINE.areaMm[0]+0.01||bb.max[1]>MACHINE.areaMm[1]+0.01){
+    log(`REJECTED: ${label} extends to [${bb.min.map(n=>n.toFixed(0))}]–[${bb.max.map(n=>n.toFixed(0))}] mm, outside the ${MACHINE.areaMm[0]}×${MACHINE.areaMm[1]} bed. Reduce size/margin or reposition.`,"er");
+    return;
+  }
+  // configure pen heights (honours the Invert up/down toggle)
+  await sendCmd("SC,4,"+rawForPct(+$("penUpPct").value));
+  await sendCmd("SC,5,"+rawForPct(+$("penDownPct").value));
+  await sendCmd("EM,1,1");               // motors on
+  await sendCmd("CS");                    // zero EBB step counters = origin here
+  posX=posY=accM1=accM2=0;
+  plotting=true; plotAbort=false; plotPaused=false;
+  $("plotPause").disabled=false; $("plotSquare").disabled=true; $("plotSvg").disabled=true;
+  log(`plotting ${label}: ${sets.length} paths, bbox ${bb.max[0].toFixed(0)}×${bb.max[1].toFixed(0)} mm`,"sys");
+  let nseg=0, total=sets.reduce((s,pl)=>s+pl.length-1,0);
+  try{
+    await penTo(false);
+    for(let i=0;i<sets.length;i++){
+      const pl=sets[i];
+      await penTo(false);
+      await emitMove(pl[0][0],pl[0][1],false);   // travel to start, pen up
+      await penTo(true);
+      for(let j=1;j<pl.length;j++){
+        while(plotPaused && !plotAbort){ await sleep(120); }
+        if(plotAbort) throw new Error("aborted");
+        await emitMove(pl[j][0],pl[j][1],true);
+        nseg++; $("plotStatus").textContent=`${nseg}/${total} segs · path ${i+1}/${sets.length}`;
+      }
+      await penTo(false);
+    }
+    await penTo(false);
+    log(`done: ${label} (${nseg} segments)`,"sys");
+  }catch(e){
+    log("plot stopped: "+e.message,"er");
+    try{ await penTo(false); }catch(_){}
+  }finally{
+    plotting=false; $("plotPause").disabled=true; $("plotResume").disabled=true;
+    $("plotSquare").disabled=!port; $("plotSvg").disabled=!port;
+  }
+}
+
+// --- test square: 50mm box + diagonal + 10mm tick at origin corner ---
+function testSquarePaths(){
+  const S=50;
+  return [
+    [[0,0],[S,0],[S,S],[0,S],[0,0]],   // square
+    [[0,0],[S,S]],                      // diagonal (shows orientation/mirroring)
+    [[0,0],[10,0]],                     // 10mm X tick — measure to confirm scale
+    [[0,0],[0,10]]                      // 10mm Y tick
+  ];
+}
+$("plotSquare").onclick=()=>plotSets(testSquarePaths(),"test square");
+
+// --- minimal SVG → polylines (mm), fit to bed ---
+function svgToSets(svgStr){
+  const doc=new DOMParser().parseFromString(svgStr,"image/svg+xml");
+  const svg=doc.querySelector("svg"); if(!svg){ log("no <svg> found","er"); return null; }
+  const vb=(svg.getAttribute("viewBox")||"").split(/[\s,]+/).map(Number);
+  const W=vb.length===4?vb[2]:parseFloat(svg.getAttribute("width"))||100;
+  const H=vb.length===4?vb[3]:parseFloat(svg.getAttribute("height"))||100;
+  const sets=[];
+  const num=s=>(s.match(/-?\d*\.?\d+(?:e-?\d+)?/gi)||[]).map(Number);
+  function sampleCubic(p0,p1,p2,p3,n=12){const o=[];for(let i=1;i<=n;i++){const t=i/n,u=1-t;
+    o.push([u*u*u*p0[0]+3*u*u*t*p1[0]+3*u*t*t*p2[0]+t*t*t*p3[0], u*u*u*p0[1]+3*u*u*t*p1[1]+3*u*t*t*p2[1]+t*t*t*p3[1]]);}return o;}
+  function sampleQuad(p0,p1,p2,n=10){const o=[];for(let i=1;i<=n;i++){const t=i/n,u=1-t;
+    o.push([u*u*p0[0]+2*u*t*p1[0]+t*t*p2[0], u*u*p0[1]+2*u*t*p1[1]+t*t*p2[1]]);}return o;}
+  // paths
+  doc.querySelectorAll("path").forEach(p=>{
+    const d=p.getAttribute("d")||""; if(!d)return;
+    const toks=d.match(/[a-zA-Z]|-?\d*\.?\d+(?:e-?\d+)?/gi)||[];
+    let i=0,cmd="",cur=[0,0],start=[0,0],poly=[];
+    const push=pt=>{cur=pt;poly.push(pt);};
+    const flush=()=>{if(poly.length>=2)sets.push(poly);poly=[];};
+    while(i<toks.length){
+      if(/[a-zA-Z]/.test(toks[i])){cmd=toks[i++];}
+      const rel=cmd===cmd.toLowerCase(); const C=cmd.toUpperCase();
+      const xy=()=>{let x=+toks[i++],y=+toks[i++];return rel?[cur[0]+x,cur[1]+y]:[x,y];};
+      if(C==="M"){flush();const pt=xy();start=pt;push(pt);cmd=rel?"l":"L";}
+      else if(C==="L"){push(xy());}
+      else if(C==="H"){let x=+toks[i++];push([rel?cur[0]+x:x,cur[1]]);}
+      else if(C==="V"){let y=+toks[i++];push([cur[0],rel?cur[1]+y:y]);}
+      else if(C==="C"){const p1=xy(),p2=xy(),p3=xy();sampleCubic(cur,p1,p2,p3).forEach(push);}
+      else if(C==="S"){const p2=xy(),p3=xy();sampleCubic(cur,cur,p2,p3).forEach(push);}
+      else if(C==="Q"){const p1=xy(),p2=xy();sampleQuad(cur,p1,p2).forEach(push);}
+      else if(C==="T"){const p2=xy();sampleQuad(cur,cur,p2).forEach(push);}
+      else if(C==="A"){i+=5;const pt=xy();push(pt);}   // crude: line to arc end
+      else if(C==="Z"){push(start.slice());flush();}
+      else {i++;}
+    }
+    flush();
+  });
+  doc.querySelectorAll("line").forEach(l=>sets.push([[+l.getAttribute("x1"),+l.getAttribute("y1")],[+l.getAttribute("x2"),+l.getAttribute("y2")]]));
+  doc.querySelectorAll("polyline,polygon").forEach(p=>{const n=num(p.getAttribute("points")||"");const pl=[];for(let k=0;k+1<n.length;k+=2)pl.push([n[k],n[k+1]]);if(p.tagName.toLowerCase()==="polygon"&&pl.length)pl.push(pl[0].slice());if(pl.length>=2)sets.push(pl);});
+  doc.querySelectorAll("circle").forEach(c=>{const cx=+c.getAttribute("cx"),cy=+c.getAttribute("cy"),r=+c.getAttribute("r");if(r>0){const pl=[];for(let a=0;a<=40;a++){const t=a/40*Math.PI*2;pl.push([cx+Math.cos(t)*r,cy+Math.sin(t)*r]);}sets.push(pl);}});
+  doc.querySelectorAll("rect").forEach(r=>{const x=+r.getAttribute("x")||0,y=+r.getAttribute("y")||0,w=+r.getAttribute("width"),h=+r.getAttribute("height");if(w>0&&h>0)sets.push([[x,y],[x+w,y],[x+w,y+h],[x,y+h],[x,y]]);});
+  if(!sets.length){ log("no plottable geometry in SVG","er"); return null; }
+  // fit to bed inside margin, preserve aspect
+  const m=+$("plotMargin").value||0, availW=MACHINE.areaMm[0]-2*m, availH=MACHINE.areaMm[1]-2*m;
+  const sc=Math.min(availW/W, availH/H);
+  return sets.map(pl=>pl.map(([x,y])=>[x*sc, y*sc]));   // origin-anchored; orientSets adds margin
+}
+$("svgFile").onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{$("svgText").value=r.result;log("SVG loaded ("+f.name+")","sys");};r.readAsText(f);};
+$("plotSvg").onclick=()=>{const t=$("svgText").value.trim();if(!t){log("paste or load an SVG first","er");return;}const s=svgToSets(t);if(s)plotSets(s,"SVG");};
+$("plotPause").onclick=()=>{plotPaused=true;$("plotResume").disabled=false;$("plotPause").disabled=true;log("paused (servo holds; press Resume)","sys");};
+$("plotResume").onclick=()=>{plotPaused=false;$("plotResume").disabled=true;$("plotPause").disabled=false;log("resumed","sys");};
+// fold plot-abort into the existing STOP button
+const _origStop=$("stopBtn").onclick;
+$("stopBtn").onclick=async (e)=>{ plotAbort=true; plotPaused=false; await _origStop(e); };
+// enable plot buttons with connection
+const _origEnable=enableControls;
+enableControls=function(on){ _origEnable(on); $("plotSquare").disabled=!on; $("plotSvg").disabled=!on; if(!on){plotAbort=true;} };
+
 log("Ready. Click 'Connect USB…', pick the iDraw, and it will auto-detect.","sys");
 log("Safety: motors start disabled; nothing moves until you press a button. Keep STOP within reach on the first jog.","sys");
+log("Stage 2: after confirming pen up/down + jog direction, run 'Plot test square' first.","sys");
 </script>
 </body>
 </html>
