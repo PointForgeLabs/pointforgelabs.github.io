@@ -151,9 +151,13 @@
       <textarea id="svgText" class="wide" rows="3" placeholder="Paste SVG markup here (paths/lines/polylines/circles), or use the file picker →" style="font:12px ui-monospace,monospace;background:#0e1116;color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:6px;resize:vertical"></textarea>
     </div>
     <div class="row">
+      <label class="f">Paper <input id="paperW" type="number" value="0" min="0" step="0.5" style="width:52px"> × <input id="paperH" type="number" value="0" min="0" step="0.5" style="width:52px"> <select id="paperUnit"><option value="in">in</option><option value="mm" selected>mm</option></select></label>
+      <label class="f">Scale <select id="scaleMode"><option value="actual" selected>Actual size (from SVG)</option><option value="paper">Fit to paper</option><option value="bed">Fit to bed</option></select></label>
+    </div>
+    <div class="row">
       <input id="svgFile" type="file" accept=".svg,image/svg+xml">
-      <button id="plotSvg" disabled>▶ Plot SVG (fit to bed)</button>
-      <span class="sys">Fits to the A2 bed inside the margin, preserving aspect. Test the square first.</span>
+      <button id="plotSvg" disabled>▶ Plot SVG</button>
+      <span class="sys">Default <b>Actual size</b> uses the SVG's real mm (set Paper in the generator). Plot is bounded to the Paper size if set, else the bed.</span>
     </div>
     <p class="hint">Motion is paced per-segment (slightly stuttery but accurate) — smooth look-ahead planning comes later. The bed is treated as <b>594 × 420 mm</b>; anything outside is rejected before moving. Position the brush at the <b>top-left start corner</b> and set origin (⌂) before plotting.</p>
   </section>
@@ -465,8 +469,9 @@ async function plotSets(rawSets,label){
   if(plotting){ log("already plotting","er"); return; }
   const sets = orientSets(rawSets).map(pl=>pl).filter(pl=>pl.length>=2);
   const bb=bbox(sets);
-  if(bb.min[0]<-0.01||bb.min[1]<-0.01||bb.max[0]>MACHINE.areaMm[0]+0.01||bb.max[1]>MACHINE.areaMm[1]+0.01){
-    log(`REJECTED: ${label} extends to [${bb.min.map(n=>n.toFixed(0))}]–[${bb.max.map(n=>n.toFixed(0))}] mm, outside the ${MACHINE.areaMm[0]}×${MACHINE.areaMm[1]} bed. Reduce size/margin or reposition.`,"er");
+  const lim=limitBox();
+  if(bb.min[0]<-0.01||bb.min[1]<-0.01||bb.max[0]>lim[0]+0.01||bb.max[1]>lim[1]+0.01){
+    log(`REJECTED: ${label} to [${bb.max.map(n=>n.toFixed(0))}] mm exceeds the ${lim[0].toFixed(0)}×${lim[1].toFixed(0)} mm ${paperMm()?"paper":"bed"}. Reduce size/margin or reposition.`,"er");
     return;
   }
   // configure pen heights (honours the Invert up/down toggle)
@@ -525,6 +530,7 @@ function svgToSets(svgStr){
   const vb=(svg.getAttribute("viewBox")||"").split(/[\s,]+/).map(Number);
   const W=vb.length===4?vb[2]:parseFloat(svg.getAttribute("width"))||100;
   const H=vb.length===4?vb[3]:parseFloat(svg.getAttribute("height"))||100;
+  const mmpu=svgMmPerUnit(svg,W,H);
   const sets=[];
   const num=s=>(s.match(/-?\d*\.?\d+(?:e-?\d+)?/gi)||[]).map(Number);
   function sampleCubic(p0,p1,p2,p3,n=12){const o=[];for(let i=1;i<=n;i++){const t=i/n,u=1-t;
@@ -561,9 +567,8 @@ function svgToSets(svgStr){
   doc.querySelectorAll("circle").forEach(c=>{const cx=+c.getAttribute("cx"),cy=+c.getAttribute("cy"),r=+c.getAttribute("r");if(r>0){const pl=[];for(let a=0;a<=40;a++){const t=a/40*Math.PI*2;pl.push([cx+Math.cos(t)*r,cy+Math.sin(t)*r]);}sets.push(pl);}});
   doc.querySelectorAll("rect").forEach(r=>{const x=+r.getAttribute("x")||0,y=+r.getAttribute("y")||0,w=+r.getAttribute("width"),h=+r.getAttribute("height");if(w>0&&h>0)sets.push([[x,y],[x+w,y],[x+w,y+h],[x,y+h],[x,y]]);});
   if(!sets.length){ log("no plottable geometry in SVG","er"); return null; }
-  // fit to bed inside margin, preserve aspect
-  const m=+$("plotMargin").value||0, availW=MACHINE.areaMm[0]-2*m, availH=MACHINE.areaMm[1]-2*m;
-  const sc=Math.min(availW/W, availH/H);
+  const sc=computeScale({W,H,mmPerUnit:mmpu}); if(sc==null) return null;
+  if(($("scaleMode")||{}).value==="actual") log(`actual size: ${(W*sc).toFixed(0)}×${(H*sc).toFixed(0)} mm`,"sys");
   return sets.map(pl=>pl.map(([x,y])=>[x*sc, y*sc]));   // origin-anchored; orientSets adds margin
 }
 $("svgFile").onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{$("svgText").value=r.result;log("SVG loaded ("+f.name+")","sys");};r.readAsText(f);};
@@ -643,8 +648,9 @@ async function paintSets(rawSets, well, opts){
   const sets=orientSets(rawSets).filter(p=>p.length>=2);
   if(!sets.length){ log("nothing to paint","er"); return; }
   const bb=bbox(sets);
-  if(bb.min[0]<-0.01||bb.min[1]<-0.01||bb.max[0]>MACHINE.areaMm[0]+0.01||bb.max[1]>MACHINE.areaMm[1]+0.01){
-    log(`REJECTED: artwork to [${bb.max.map(n=>n.toFixed(0))}] mm exceeds the ${MACHINE.areaMm[0]}×${MACHINE.areaMm[1]} bed`,"er"); return; }
+  const lim=limitBox();
+  if(bb.min[0]<-0.01||bb.min[1]<-0.01||bb.max[0]>lim[0]+0.01||bb.max[1]>lim[1]+0.01){
+    log(`REJECTED: artwork to [${bb.max.map(n=>n.toFixed(0))}] mm exceeds the ${lim[0].toFixed(0)}×${lim[1].toFixed(0)} mm ${paperMm()?"paper":"bed"}`,"er"); return; }
   const paper=+$("penDownPct").value, refill=Math.max(5,+$("refillDist").value), rinseN=+$("rinseEveryN").value||0;
   await sendCmd("SC,4,"+rawForPct(+$("penUpPct").value)); await sendCmd("EM,1,1");
   plotting=true; plotAbort=false; plotPaused=false; paintBusyUI(true); distSinceDip=0;
@@ -695,6 +701,20 @@ $("paintSvgWell").onclick=()=>{ const t=$("svgText").value.trim(); if(!t){log("l
 
 // --- multi-colour: extract polylines tagged by stroke colour, map each colour to a well ---
 function fitScale(W,H){ const m=+$("plotMargin").value||0; return Math.min((MACHINE.areaMm[0]-2*m)/W,(MACHINE.areaMm[1]-2*m)/H); }
+// --- real-world sizing: read the SVG's physical size and respect a paper size ---
+function parseLen(s){ if(s==null)return null; const m=String(s).trim().match(/^([\d.]+)\s*(mm|cm|in|pt|pc|px)?$/i); if(!m)return null;
+  const v=+m[1], f={mm:1,cm:10,in:25.4,pt:25.4/72,pc:25.4/6}[(m[2]||"").toLowerCase()]; return f?v*f:null; } // px/unitless → null (no real size)
+function svgMmPerUnit(svg,W,H){ const wl=parseLen(svg.getAttribute("width")), hl=parseLen(svg.getAttribute("height")); if(wl&&W>0)return wl/W; if(hl&&H>0)return hl/H; return null; }
+function paperMm(){ const u=($("paperUnit")||{}).value||"mm", f=u==="in"?25.4:1;
+  const w=(+($("paperW")||{}).value||0)*f, h=(+($("paperH")||{}).value||0)*f; return (w>0&&h>0)?{w,h}:null; }
+function limitBox(){ const p=paperMm(); if(p && p.w<=MACHINE.areaMm[0]+1 && p.h<=MACHINE.areaMm[1]+1) return [p.w,p.h]; return MACHINE.areaMm.slice(); }
+function computeScale(ex){
+  const mode=($("scaleMode")||{}).value||"actual", m=+$("plotMargin").value||0;
+  if(mode==="actual"){ if(ex.mmPerUnit) return ex.mmPerUnit;
+    log("SVG has no real-world size (width has no mm/cm/in). Set Paper size in the generator, or pick a Fit scale mode.","er"); return null; }
+  const box=(mode==="paper" && paperMm()) ? [paperMm().w,paperMm().h] : MACHINE.areaMm;
+  return Math.min((box[0]-2*m)/ex.W,(box[1]-2*m)/ex.H);
+}
 function colorOf(el){ return el.getAttribute("stroke") || (el.parentNode&&el.parentNode.getAttribute&&el.parentNode.getAttribute("stroke")) || "#000000"; }
 // SVG path d -> array of polylines (M/L/H/V/C/S/Q/T/Z; A crudely lined; beziers sampled)
 function pathToPolys(d){
@@ -736,7 +756,7 @@ function extractColored(svgStr){
   doc.querySelectorAll("circle").forEach(c=>{ const cx=+c.getAttribute("cx"),cy=+c.getAttribute("cy"),r=+c.getAttribute("r"); if(r>0){ const pl=[]; for(let a=0;a<=40;a++){ const t=a/40*Math.PI*2; pl.push([cx+Math.cos(t)*r,cy+Math.sin(t)*r]); } items.push({color:colorOf(c),pl}); } });
   doc.querySelectorAll("rect").forEach(r=>{ const x=+r.getAttribute("x")||0,y=+r.getAttribute("y")||0,w=+r.getAttribute("width"),h=+r.getAttribute("height"); if(w>0&&h>0)items.push({color:colorOf(r),pl:[[x,y],[x+w,y],[x+w,y+h],[x,y+h],[x,y]]}); });
   if(!items.length){ log("no plottable geometry in SVG","er"); return null; }
-  return {items,W,H};
+  return {items,W,H,mmPerUnit:svgMmPerUnit(svg,W,H)};
 }
 $("scanColors").onclick=()=>{ const t=$("svgText").value.trim(); if(!t)return; const ex=extractColored(t); if(!ex)return;
   const byc={}; ex.items.forEach(it=>byc[it.color]=(byc[it.color]||0)+1);
@@ -747,7 +767,7 @@ $("scanColors").onclick=()=>{ const t=$("svgText").value.trim(); if(!t)return; c
   c.querySelectorAll("select").forEach(sel=>{ stations.forEach((s,i)=>{ if(s.type==="paint"){ const o=document.createElement("option"); o.value=i; o.textContent=s.label; sel.appendChild(o);} }); });
   log(Object.keys(byc).length+" colours found — assign wells, then 'Paint SVG by colour'","sys"); };
 $("paintSvgColor").onclick=async()=>{ const t=$("svgText").value.trim(); if(!t)return; const ex=extractColored(t); if(!ex)return;
-  const sc=fitScale(ex.W,ex.H), map={};
+  const sc=computeScale(ex); if(sc==null)return; const map={};
   $("colorMap").querySelectorAll("select").forEach(sel=>map[sel.dataset.col]=+sel.value);
   const groups={}; ex.items.forEach(it=>{ (groups[it.color]=groups[it.color]||[]).push(it.pl.map(([x,y])=>[x*sc,y*sc])); });
   const cols=Object.keys(groups);
