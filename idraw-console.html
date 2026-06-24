@@ -157,6 +157,48 @@
     </div>
     <p class="hint">Motion is paced per-segment (slightly stuttery but accurate) — smooth look-ahead planning comes later. The bed is treated as <b>594 × 420 mm</b>; anything outside is rejected before moving. Position the brush at the <b>top-left start corner</b> and set origin (⌂) before plotting.</p>
   </section>
+
+  <!-- PAINT (stage 3) -->
+  <section class="panel" style="grid-column:1/-1">
+    <h2>Paint — dip / refill engine <span class="pill">stage 3 · EBB</span></h2>
+    <p class="hint">1) Set artwork origin with <b>⌂</b> (Jog box). 2) Jog the head over each well/water/blot and hit <b>Capture</b> to register it (stations may sit outside the drawing area — that's fine). 3) Calibrate refill distance. 4) Paint. All values below are yours to tune per paint/brush — nothing is hardcoded.</p>
+    <div id="stationRows"></div>
+    <div class="row"><button id="addStation">+ add station</button></div>
+
+    <h2 style="margin-top:12px">Paint parameters</h2>
+    <div class="row">
+      <label class="f">Refill distance <input id="refillDist" type="number" value="60" min="5" max="2000"> mm</label>
+      <label class="f">Dip depth % <input id="dipDepth" type="number" value="70" min="0" max="100"></label>
+      <label class="f">Stir <select id="stirType"><option value="spiral" selected>spiral</option><option value="dot">dot</option></select></label>
+      <label class="f">size <input id="stirSize" type="number" value="4" min="0" max="40"> mm</label>
+      <label class="f">turns <input id="stirTurns" type="number" value="2" min="1" max="6"></label>
+      <label class="f">dwell <input id="wellDwell" type="number" value="300" min="0" max="3000"> ms</label>
+    </div>
+    <div class="row">
+      <label class="f">Rinse every <input id="rinseEveryN" type="number" value="0" min="0" max="200"> strokes (0=off)</label>
+      <label class="f">water dips <input id="waterDips" type="number" value="3" min="0" max="10"></label>
+      <label class="f">blot dabs <input id="blotDabs" type="number" value="3" min="0" max="10"></label>
+      <label class="f">Active well <select id="activeWell"></select></label>
+    </div>
+
+    <div class="row">
+      <button id="calibLine" disabled>Draw calibration line</button>
+      <label class="f">length <input id="calibLen" type="number" value="200" min="20" max="500"> mm</label>
+      <span class="sys">no dips — load brush once by hand, watch where it fades to dry, set that as Refill distance</span>
+    </div>
+    <div class="row">
+      <button id="paintZig" disabled>▶ Paint test zigzag (watch the dips)</button>
+      <button id="paintSvgWell" disabled>▶ Paint SVG — active well</button>
+    </div>
+
+    <h2 style="margin-top:12px">Multi-colour (drives the generator's per-colour layers)</h2>
+    <div class="row">
+      <button id="scanColors" disabled>Scan SVG colours</button>
+      <span class="sys">assign each colour a paint well, water-clean runs between colours, then:</span>
+      <button id="paintSvgColor" disabled>▶ Paint SVG by colour</button>
+    </div>
+    <div id="colorMap"></div>
+  </section>
 </main>
 
 <script>
@@ -358,10 +400,9 @@ $("zApply").onclick = async ()=>{
 function jogSteps(){ return (+$("jogDist").value) * (+$("stepsPerMm").value); }
 function jogDurMs(distMm){ const v=Math.max(2,+$("jogSpeed").value); return Math.max(30, Math.round(distMm/v*1000)); }
 async function ebbJog(dx,dy){
-  const s = jogSteps();
-  const dist = +$("jogDist").value;
-  const m1 = Math.round((dx+dy)*s), m2 = Math.round((dx-dy)*s);
-  await sendCmd(`SM,${jogDurMs(dist)},${m1},${m2}`);
+  // routed through moveAbs so head position is always tracked (needed for station Capture)
+  const d=+$("jogDist").value;
+  await moveAbs(posX+dx*d, posY+dy*d, Math.max(2,+$("jogSpeed").value));
 }
 async function grblJog(dx,dy){
   const d=+$("jogDist").value, f=Math.max(2,+$("jogSpeed").value)*60; // mm/min
@@ -376,6 +417,7 @@ $("jHome").onclick=async ()=>{
   // "set current position as origin" — EBB: clear step counters; GRBL: G92 zero.
   if(ctype==="grbl"){ await sendCmd("G92 X0 Y0"); }
   else { await sendCmd("CS"); }  // EBB clear step position
+  posX=posY=accM1=accM2=0;       // origin for both jog + plot/paint frames
   log("current position set as origin","sys");
 };
 
@@ -402,16 +444,18 @@ function bbox(sets){let a=[Infinity,Infinity],b=[-Infinity,-Infinity];
   sets.forEach(pl=>pl.forEach(([x,y])=>{a[0]=Math.min(a[0],x);a[1]=Math.min(a[1],y);b[0]=Math.max(b[0],x);b[1]=Math.max(b[1],y);}));
   return {min:a,max:b};}
 
-async function emitMove(x,y,draw){
-  // absolute CoreXY motor targets (m1=x+y, m2=x-y) → step deltas
+async function moveAbs(x,y,speed){
+  // absolute CoreXY motor targets (m1=x+y, m2=x-y) → step deltas, paced by head travel time
   const spmm=+$("stepsPerMm").value||80;
   const tM1=Math.round((x+y)*spmm), tM2=Math.round((x-y)*spmm);
   const d1=tM1-accM1, d2=tM2-accM2;
   const L=Math.hypot(x-posX,y-posY);
-  const sp=(draw?(+$("drawSpeed").value):(+$("travelSpeed").value))||25;
-  const dur=Math.max(1,Math.round(L/sp*1000));
+  const dur=Math.max(1,Math.round(L/Math.max(2,speed)*1000));
   if(d1!==0||d2!==0){ await sendCmd(`SM,${dur},${d1},${d2}`); await sleep(dur); }
   accM1=tM1; accM2=tM2; posX=x; posY=y;
+}
+async function emitMove(x,y,draw){
+  await moveAbs(x,y,(draw?(+$("drawSpeed").value):(+$("travelSpeed").value))||25);
 }
 async function penTo(down){
   await sendCmd(down?"SP,0":"SP,1");
@@ -531,7 +575,189 @@ const _origStop=$("stopBtn").onclick;
 $("stopBtn").onclick=async (e)=>{ plotAbort=true; plotPaused=false; await _origStop(e); };
 // enable plot buttons with connection
 const _origEnable=enableControls;
-enableControls=function(on){ _origEnable(on); $("plotSquare").disabled=!on; $("plotSvg").disabled=!on; if(!on){plotAbort=true;} };
+enableControls=function(on){ _origEnable(on);
+  ["plotSquare","plotSvg","calibLine","paintZig","paintSvgWell","scanColors","paintSvgColor"].forEach(id=>{const e=$(id);if(e)e.disabled=!on;});
+  if(!on){plotAbort=true;} };
+
+/* ============================ PAINT ENGINE (stage 3, EBB) ============================
+   Refill-distance dipping built on the stage-2 motion core. Splits strokes so the brush
+   re-dips before it runs dry; water-rinse + blot on a stroke schedule; per-colour wells.
+   Every number is a live parameter — calibrate per paint/brush, nothing hardcoded. */
+let distSinceDip=0;
+const TRAVEL=()=>Math.max(2,+$("travelSpeed").value||70), DRAW=()=>Math.max(2,+$("drawSpeed").value||25);
+async function raise(){ await sendCmd("SP,1"); await sleep(260); }
+async function lower(pct){ await sendCmd("SC,5,"+rawForPct(pct)); await sendCmd("SP,0"); await sleep(420); }
+
+// --- stations (paint wells / water / blot), registered to the bed by jogging + Capture ---
+let stations=[{label:"Paint 1",type:"paint",x:0,y:0},{label:"Water",type:"water",x:0,y:0},{label:"Blot",type:"blot",x:0,y:0}];
+function stationByType(t){ return stations.find(s=>s.type===t); }
+function activeWellObj(){ const i=+($("activeWell").value); return stations[i]||stationByType("paint"); }
+function refreshActiveWell(){ const sel=$("activeWell"); if(!sel)return; const cur=sel.value; sel.innerHTML="";
+  stations.forEach((s,i)=>{ if(s.type==="paint"){ const o=document.createElement("option"); o.value=i; o.textContent=s.label; sel.appendChild(o);} });
+  if(cur && sel.querySelector(`option[value="${cur}"]`)) sel.value=cur; }
+function renderStations(){ const c=$("stationRows"); if(!c)return; c.innerHTML="";
+  stations.forEach((s,idx)=>{ const r=document.createElement("div"); r.className="row";
+    r.innerHTML=`<input type="text" value="${s.label}" style="width:84px" data-k="label" data-i="${idx}">`+
+      `<select data-k="type" data-i="${idx}">${["paint","water","blot"].map(t=>`<option value="${t}"${s.type===t?" selected":""}>${t}</option>`).join("")}</select>`+
+      `<label class="f">x <input type="number" step="0.1" value="${s.x.toFixed(1)}" style="width:66px" data-k="x" data-i="${idx}"></label>`+
+      `<label class="f">y <input type="number" step="0.1" value="${s.y.toFixed(1)}" style="width:66px" data-k="y" data-i="${idx}"></label>`+
+      `<button data-cap="${idx}" title="set to current head position">Capture</button><button data-go="${idx}">Go</button><button data-del="${idx}">✕</button>`;
+    c.appendChild(r); });
+  c.querySelectorAll("input,select").forEach(el=>el.onchange=e=>{ const i=+e.target.dataset.i,k=e.target.dataset.k;
+    stations[i][k]=(k==="x"||k==="y")?(+e.target.value||0):e.target.value; refreshActiveWell(); });
+  c.querySelectorAll("[data-cap]").forEach(b=>b.onclick=()=>{ const i=+b.dataset.cap; stations[i].x=posX; stations[i].y=posY; renderStations(); log(`captured ${stations[i].label} @ ${posX.toFixed(1)},${posY.toFixed(1)} mm`,"sys"); });
+  c.querySelectorAll("[data-go]").forEach(b=>b.onclick=async()=>{ if(!port)return; const s=stations[+b.dataset.go]; await raise(); await moveAbs(s.x,s.y,TRAVEL()); log("moved to "+s.label,"sys"); });
+  c.querySelectorAll("[data-del]").forEach(b=>b.onclick=()=>{ stations.splice(+b.dataset.del,1); renderStations(); refreshActiveWell(); });
+  refreshActiveWell(); }
+$("addStation").onclick=()=>{ stations.push({label:"Paint "+stations.length,type:"paint",x:posX,y:posY}); renderStations(); };
+renderStations();
+
+// --- dip / water / blot routines ---
+async function doDip(well){
+  if(plotAbort) throw new Error("aborted");
+  await raise(); await moveAbs(well.x,well.y,TRAVEL());
+  const depth=+$("dipDepth").value;
+  if($("stirType").value==="spiral"){
+    await lower(depth);
+    const turns=+$("stirTurns").value||2, r=+$("stirSize").value||4, N=24;
+    for(let k=1;k<=N;k++){ if(plotAbort)throw new Error("aborted"); const a=k/N*Math.PI*2*turns, rr=r*(0.2+0.8*k/N);
+      await moveAbs(well.x+Math.cos(a)*rr, well.y+Math.sin(a)*rr, DRAW()); }
+    await moveAbs(well.x,well.y,DRAW());
+  } else { await lower(depth); await sleep(+$("wellDwell").value||300); }
+  await raise(); distSinceDip=0;
+}
+async function doWater(){
+  const ws=stationByType("water"); if(!ws) return;
+  const n=+$("waterDips").value||0, depth=+$("dipDepth").value;
+  for(let k=0;k<n;k++){ if(plotAbort)return; await raise(); await moveAbs(ws.x,ws.y,TRAVEL()); await lower(depth); await sleep(150); }
+  await raise();
+  const bs=stationByType("blot");
+  if(bs){ const nb=+$("blotDabs").value||0; for(let k=0;k<nb;k++){ if(plotAbort)return; await moveAbs(bs.x,bs.y,TRAVEL()); await lower(depth); await sleep(120); await raise(); } }
+}
+
+// --- core paint loop (dips:false → plain draw, used for calibration) ---
+async function paintSets(rawSets, well, opts){
+  opts=opts||{}; const dips=opts.dips!==false;
+  if(plotting){ log("busy","er"); return; }
+  if(dips && !well){ log("no paint well — capture/select one first","er"); return; }
+  const sets=orientSets(rawSets).filter(p=>p.length>=2);
+  if(!sets.length){ log("nothing to paint","er"); return; }
+  const bb=bbox(sets);
+  if(bb.min[0]<-0.01||bb.min[1]<-0.01||bb.max[0]>MACHINE.areaMm[0]+0.01||bb.max[1]>MACHINE.areaMm[1]+0.01){
+    log(`REJECTED: artwork to [${bb.max.map(n=>n.toFixed(0))}] mm exceeds the ${MACHINE.areaMm[0]}×${MACHINE.areaMm[1]} bed`,"er"); return; }
+  const paper=+$("penDownPct").value, refill=Math.max(5,+$("refillDist").value), rinseN=+$("rinseEveryN").value||0;
+  await sendCmd("SC,4,"+rawForPct(+$("penUpPct").value)); await sendCmd("EM,1,1");
+  plotting=true; plotAbort=false; plotPaused=false; paintBusyUI(true); distSinceDip=0;
+  let nseg=0, strokes=0, total=sets.reduce((s,p)=>s+p.length-1,0);
+  const pausecheck=async()=>{ while(plotPaused&&!plotAbort) await sleep(120); if(plotAbort) throw new Error("aborted"); };
+  try{
+    await raise();
+    if(dips) await doDip(well);                     // initial brush load
+    for(let i=0;i<sets.length;i++){
+      const pl=sets[i];
+      await raise(); await moveAbs(pl[0][0],pl[0][1],TRAVEL()); await lower(paper);
+      for(let j=1;j<pl.length;j++){
+        const A=pl[j-1], B=pl[j], segLen=Math.hypot(B[0]-A[0],B[1]-A[1]);
+        if(segLen<1e-6) continue;
+        let drawn=0;
+        while(drawn < segLen-1e-6){               // walk the segment, dipping every `refill` mm of drawn ink
+          await pausecheck();
+          if(dips && distSinceDip >= refill-1e-6){
+            const f=drawn/segLen, cx=A[0]+(B[0]-A[0])*f, cy=A[1]+(B[1]-A[1])*f;
+            await raise(); await doDip(well);       // doDip resets distSinceDip
+            await moveAbs(cx,cy,TRAVEL()); await lower(paper);   // resume at the same point = overlap
+          }
+          const budget = dips ? (refill-distSinceDip) : (segLen-drawn);
+          const step = Math.min(budget, segLen-drawn);
+          drawn += step;
+          const f=drawn/segLen;
+          await moveAbs(A[0]+(B[0]-A[0])*f, A[1]+(B[1]-A[1])*f, DRAW());
+          if(dips) distSinceDip+=step; nseg++;
+          $("plotStatus").textContent=`${nseg} segs · path ${i+1}/${sets.length}`;
+        }
+      }
+      await raise(); strokes++;
+      if(dips && rinseN>0 && strokes%rinseN===0){ await doWater(); await doDip(well); }
+    }
+    await raise();
+    if($("homeWhenDone").checked) await moveAbs(0,0,TRAVEL());
+    log(`paint done (${nseg} segs, ${strokes} strokes)`,"sys");
+  }catch(e){ log("paint stopped: "+e.message,"er"); try{ await raise(); }catch(_){}
+  }finally{ plotting=false; paintBusyUI(false); }
+}
+function paintBusyUI(on){ $("plotPause").disabled=!on;
+  ["plotSquare","plotSvg","calibLine","paintZig","paintSvgWell","scanColors","paintSvgColor"].forEach(id=>{const e=$(id);if(e)e.disabled=on?true:!port;}); }
+
+// calibration line (no dips) + test zigzag (with dips)
+$("calibLine").onclick=()=>{ const len=+$("calibLen").value||200; paintSets([[[0,0],[len,0]]],null,{dips:false}); };
+$("paintZig").onclick=()=>{ const pl=[]; let x=0; for(let k=0;k<14;k++){ pl.push([x,k%2?0:40]); x+=20; } paintSets([pl],activeWellObj(),{dips:true}); };
+$("paintSvgWell").onclick=()=>{ const t=$("svgText").value.trim(); if(!t){log("load an SVG first","er");return;} const s=svgToSets(t); if(s) paintSets(s,activeWellObj(),{dips:true}); };
+
+// --- multi-colour: extract polylines tagged by stroke colour, map each colour to a well ---
+function fitScale(W,H){ const m=+$("plotMargin").value||0; return Math.min((MACHINE.areaMm[0]-2*m)/W,(MACHINE.areaMm[1]-2*m)/H); }
+function colorOf(el){ return el.getAttribute("stroke") || (el.parentNode&&el.parentNode.getAttribute&&el.parentNode.getAttribute("stroke")) || "#000000"; }
+// SVG path d -> array of polylines (M/L/H/V/C/S/Q/T/Z; A crudely lined; beziers sampled)
+function pathToPolys(d){
+  if(!d) return [];
+  const toks=d.match(/[a-zA-Z]|-?\d*\.?\d+(?:e-?\d+)?/gi)||[];
+  const sets=[]; let i=0,cmd="",cur=[0,0],start=[0,0],poly=[];
+  const push=pt=>{cur=pt;poly.push(pt);};
+  const flush=()=>{ if(poly.length>=2)sets.push(poly); poly=[]; };
+  const SC=(p0,p1,p2,p3,n=12)=>{const o=[];for(let k=1;k<=n;k++){const t=k/n,u=1-t;o.push([u*u*u*p0[0]+3*u*u*t*p1[0]+3*u*t*t*p2[0]+t*t*t*p3[0],u*u*u*p0[1]+3*u*u*t*p1[1]+3*u*t*t*p2[1]+t*t*t*p3[1]]);}return o;};
+  const SQ=(p0,p1,p2,n=10)=>{const o=[];for(let k=1;k<=n;k++){const t=k/n,u=1-t;o.push([u*u*p0[0]+2*u*t*p1[0]+t*t*p2[0],u*u*p0[1]+2*u*t*p1[1]+t*t*p2[1]]);}return o;};
+  while(i<toks.length){
+    if(/[a-zA-Z]/.test(toks[i])) cmd=toks[i++];
+    const rel=cmd===cmd.toLowerCase(), C=cmd.toUpperCase();
+    const xy=()=>{ let x=+toks[i++],y=+toks[i++]; return rel?[cur[0]+x,cur[1]+y]:[x,y]; };
+    if(C==="M"){ flush(); const pt=xy(); start=pt; push(pt); cmd=rel?"l":"L"; }
+    else if(C==="L"){ push(xy()); }
+    else if(C==="H"){ let x=+toks[i++]; push([rel?cur[0]+x:x,cur[1]]); }
+    else if(C==="V"){ let y=+toks[i++]; push([cur[0],rel?cur[1]+y:y]); }
+    else if(C==="C"){ const p1=xy(),p2=xy(),p3=xy(); SC(cur,p1,p2,p3).forEach(push); }
+    else if(C==="S"){ const p2=xy(),p3=xy(); SC(cur,cur,p2,p3).forEach(push); }
+    else if(C==="Q"){ const p1=xy(),p2=xy(); SQ(cur,p1,p2).forEach(push); }
+    else if(C==="T"){ const p2=xy(); SQ(cur,cur,p2).forEach(push); }
+    else if(C==="A"){ i+=5; push(xy()); }
+    else if(C==="Z"){ push(start.slice()); flush(); }
+    else { i++; }
+  }
+  flush(); return sets;
+}
+function extractColored(svgStr){
+  const doc=new DOMParser().parseFromString(svgStr,"image/svg+xml");
+  const svg=doc.querySelector("svg"); if(!svg){ log("no <svg> found","er"); return null; }
+  const vb=(svg.getAttribute("viewBox")||"").split(/[\s,]+/).map(Number);
+  const W=vb.length===4?vb[2]:parseFloat(svg.getAttribute("width"))||100;
+  const H=vb.length===4?vb[3]:parseFloat(svg.getAttribute("height"))||100;
+  const items=[], num=s=>(s.match(/-?\d*\.?\d+(?:e-?\d+)?/gi)||[]).map(Number);
+  doc.querySelectorAll("path").forEach(p=>{ const c=colorOf(p); pathToPolys(p.getAttribute("d")||"").forEach(pl=>items.push({color:c,pl})); });
+  doc.querySelectorAll("line").forEach(l=>items.push({color:colorOf(l),pl:[[+l.getAttribute("x1"),+l.getAttribute("y1")],[+l.getAttribute("x2"),+l.getAttribute("y2")]]}));
+  doc.querySelectorAll("polyline,polygon").forEach(p=>{ const n=num(p.getAttribute("points")||""),pl=[]; for(let k=0;k+1<n.length;k+=2)pl.push([n[k],n[k+1]]); if(p.tagName.toLowerCase()==="polygon"&&pl.length)pl.push(pl[0].slice()); if(pl.length>=2)items.push({color:colorOf(p),pl}); });
+  doc.querySelectorAll("circle").forEach(c=>{ const cx=+c.getAttribute("cx"),cy=+c.getAttribute("cy"),r=+c.getAttribute("r"); if(r>0){ const pl=[]; for(let a=0;a<=40;a++){ const t=a/40*Math.PI*2; pl.push([cx+Math.cos(t)*r,cy+Math.sin(t)*r]); } items.push({color:colorOf(c),pl}); } });
+  doc.querySelectorAll("rect").forEach(r=>{ const x=+r.getAttribute("x")||0,y=+r.getAttribute("y")||0,w=+r.getAttribute("width"),h=+r.getAttribute("height"); if(w>0&&h>0)items.push({color:colorOf(r),pl:[[x,y],[x+w,y],[x+w,y+h],[x,y+h],[x,y]]}); });
+  if(!items.length){ log("no plottable geometry in SVG","er"); return null; }
+  return {items,W,H};
+}
+$("scanColors").onclick=()=>{ const t=$("svgText").value.trim(); if(!t)return; const ex=extractColored(t); if(!ex)return;
+  const byc={}; ex.items.forEach(it=>byc[it.color]=(byc[it.color]||0)+1);
+  const c=$("colorMap"); c.innerHTML="";
+  Object.keys(byc).forEach(col=>{ const r=document.createElement("div"); r.className="row";
+    r.innerHTML=`<span style="width:15px;height:15px;border-radius:3px;display:inline-block;background:${col};border:1px solid #000"></span><span class="sys" style="width:120px">${col} · ${byc[col]} paths</span> → <select data-col="${col}"></select>`;
+    c.appendChild(r); });
+  c.querySelectorAll("select").forEach(sel=>{ stations.forEach((s,i)=>{ if(s.type==="paint"){ const o=document.createElement("option"); o.value=i; o.textContent=s.label; sel.appendChild(o);} }); });
+  log(Object.keys(byc).length+" colours found — assign wells, then 'Paint SVG by colour'","sys"); };
+$("paintSvgColor").onclick=async()=>{ const t=$("svgText").value.trim(); if(!t)return; const ex=extractColored(t); if(!ex)return;
+  const sc=fitScale(ex.W,ex.H), map={};
+  $("colorMap").querySelectorAll("select").forEach(sel=>map[sel.dataset.col]=+sel.value);
+  const groups={}; ex.items.forEach(it=>{ (groups[it.color]=groups[it.color]||[]).push(it.pl.map(([x,y])=>[x*sc,y*sc])); });
+  const cols=Object.keys(groups);
+  for(let ci=0;ci<cols.length;ci++){ if(plotAbort)break;
+    const well=stations[map[cols[ci]]]||activeWellObj();
+    log(`colour ${ci+1}/${cols.length}: ${cols[ci]} → ${well?well.label:"?"}`,"sys");
+    await paintSets(groups[cols[ci]], well, {dips:true});
+    if(ci<cols.length-1 && !plotAbort) await doWater();   // clean between colours
+  }
+};
 
 log("Ready. Click 'Connect USB…', pick the iDraw, and it will auto-detect.","sys");
 log("Safety: motors start disabled; nothing moves until you press a button. Keep STOP within reach on the first jog.","sys");
