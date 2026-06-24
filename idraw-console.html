@@ -137,6 +137,7 @@
       <label class="f"><input type="checkbox" id="invX"> Invert X</label>
       <label class="f"><input type="checkbox" id="invY"> Invert Y</label>
       <label class="f"><input type="checkbox" id="swapXY"> Swap X/Y</label>
+      <label class="f"><input type="checkbox" id="homeWhenDone" checked> Return home when done</label>
       <span class="sys">Use these to fix mirrored/rotated output without re-plotting blind.</span>
     </div>
     <div class="row">
@@ -450,6 +451,7 @@ async function plotSets(rawSets,label){
       await penTo(false);
     }
     await penTo(false);
+    if($("homeWhenDone").checked){ await emitMove(0,0,false); log("returned to origin (0,0)","sys"); }
     log(`done: ${label} (${nseg} segments)`,"sys");
   }catch(e){
     log("plot stopped: "+e.message,"er");
