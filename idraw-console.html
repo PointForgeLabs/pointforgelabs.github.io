@@ -138,7 +138,12 @@
       <label class="f"><input type="checkbox" id="invY"> Invert Y</label>
       <label class="f"><input type="checkbox" id="swapXY"> Swap X/Y</label>
       <label class="f"><input type="checkbox" id="homeWhenDone" checked> Return home when done</label>
-      <label class="f" title="Join lines that share an endpoint into long continuous strokes, then order + reverse them so the head flows (serpentines parallel lines) instead of shuttling back and forth in short hops."><input type="checkbox" id="optPaths" checked> Merge + order paths</label>
+      <label class="f" title="How strokes are laid down. 'As drawn' keeps every stroke in the generator's own direction and order (only merging split segments into long strokes) so the brush NEVER sweeps back and forth. 'Flow' also reorders to cut pen-up travel but still never reverses a stroke. 'Serpentine' is the least travel but paints back and forth.">Strokes
+        <select id="pathMode">
+          <option value="asdrawn" selected>as drawn (merge only)</option>
+          <option value="flow">flow (same direction, less travel)</option>
+          <option value="serpentine">serpentine (least travel)</option>
+        </select></label>
       <span class="sys">Use these to fix mirrored/rotated output without re-plotting blind.</span>
     </div>
     <div class="row">
@@ -491,7 +496,7 @@ function mergeLines(polys,tol){
   }
   return out;
 }
-function orderLines(lines,start){
+function orderLines(lines,start,allowReverse){
   if(lines.length>6000) return lines;     // safety: skip O(n^2) sort on huge sets
   const used=new Array(lines.length).fill(false), out=[];
   let cur=start?start.slice():[0,0];
@@ -500,21 +505,26 @@ function orderLines(lines,start){
     for(let i=0;i<lines.length;i++){ if(used[i]) continue;
       const a=lines[i][0], b=lines[i][lines[i].length-1];
       const da=Math.hypot(a[0]-cur[0],a[1]-cur[1]); if(da<bd){bd=da;best=i;rev=false;}
-      const db=Math.hypot(b[0]-cur[0],b[1]-cur[1]); if(db<bd){bd=db;best=i;rev=true;} }
+      // only consider painting a stroke end-first (reversing it) when serpentine is allowed
+      if(allowReverse){ const db=Math.hypot(b[0]-cur[0],b[1]-cur[1]); if(db<bd){bd=db;best=i;rev=true;} } }
     if(best<0) break; used[best]=true;
     const line=rev?lines[best].slice().reverse():lines[best];
     out.push(line); cur=line[line.length-1];
   }
   return out;
 }
+/* Merge always runs (joins split segments into long strokes — never changes the path the brush
+   takes, only removes pen-ups). Reorder/reverse is gated by the Strokes mode so the engine never
+   adds a back-and-forth sweep the artwork didn't ask for. */
 function planStrokes(sets){
-  if(!($("optPaths")&&$("optPaths").checked)) return sets;
+  const mode=($("pathMode")&&$("pathMode").value)||"asdrawn";
   const before=sets.length;
-  const merged=mergeLines(sets,0.6);
-  const ordered=orderLines(merged,[0,0]);
-  if(merged.length<before) log(`planned: merged ${before}→${merged.length} strokes, ordered to flow`,"sys");
-  else log(`planned: ${ordered.length} strokes ordered to flow`,"sys");
-  return ordered;
+  const merged=mergeLines(sets,0.6);                          // long continuous strokes, as-drawn direction
+  let out=merged;
+  if(mode==="flow") out=orderLines(merged,[0,0],false);       // reorder to cut travel, never reverse a stroke
+  else if(mode==="serpentine") out=orderLines(merged,[0,0],true); // reorder + reverse (paints back and forth)
+  log(`planned: ${before}→${out.length} strokes (${mode==="asdrawn"?"as drawn, no reversing":mode})`,"sys");
+  return out;
 }
 
 async function moveAbs(x,y,speed){
