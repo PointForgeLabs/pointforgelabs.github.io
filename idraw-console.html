@@ -138,6 +138,7 @@
       <label class="f"><input type="checkbox" id="invY"> Invert Y</label>
       <label class="f"><input type="checkbox" id="swapXY"> Swap X/Y</label>
       <label class="f"><input type="checkbox" id="homeWhenDone" checked> Return home when done</label>
+      <label class="f" title="Join lines that share an endpoint into long continuous strokes, then order + reverse them so the head flows (serpentines parallel lines) instead of shuttling back and forth in short hops."><input type="checkbox" id="optPaths" checked> Merge + order paths</label>
       <span class="sys">Use these to fix mirrored/rotated output without re-plotting blind.</span>
     </div>
     <div class="row">
@@ -172,6 +173,7 @@
     <h2 style="margin-top:12px">Paint parameters</h2>
     <div class="row">
       <label class="f">Refill distance <input id="refillDist" type="number" value="60" min="5" max="2000"> mm</label>
+      <label class="f" title="Randomly varies each charge's draw distance ±this % around Refill distance, so strokes come out at varying lengths and opacity (some long dry fades, some short saturated) instead of uniform. 0 = every stroke identical length.">Length variance <input id="lenVar" type="number" value="35" min="0" max="95"> %</label>
       <label class="f">Dip depth % <input id="dipDepth" type="number" value="70" min="0" max="100"></label>
       <label class="f">Stir <select id="stirType"><option value="spiral" selected>spiral</option><option value="dot">dot</option></select></label>
       <label class="f">size <input id="stirSize" type="number" value="4" min="0" max="40"> mm</label>
@@ -448,6 +450,73 @@ function bbox(sets){let a=[Infinity,Infinity],b=[-Infinity,-Infinity];
   sets.forEach(pl=>pl.forEach(([x,y])=>{a[0]=Math.min(a[0],x);a[1]=Math.min(a[1],y);b[0]=Math.max(b[0],x);b[1]=Math.max(b[1],y);}));
   return {min:a,max:b};}
 
+/* ---------- path planning: merge coincident lines + order to flow (no shuttling) ----------
+   This is what stops the "back-and-forth in short strokes". vpype-style linemerge joins
+   polylines that share an endpoint into one long stroke; then a nearest-neighbour sort with
+   per-line reversal makes the head flow (and naturally serpentines parallel lines: line N ends
+   where line N+1 begins, reversed) instead of jumping back to each start. */
+function mergeLines(polys,tol){
+  tol=tol||0.6;
+  const lines=polys.filter(p=>p&&p.length>=2).map(p=>p.map(pt=>pt.slice()));
+  const used=new Array(lines.length).fill(false);
+  const q=v=>Math.round(v/tol);
+  const idx=new Map();                     // bucket endpoints (and 8 neighbours) for tolerant match
+  function bk(pt){return q(pt[0])+","+q(pt[1]);}
+  function addEnds(li){
+    [[lines[li][0],0],[lines[li][lines[li].length-1],1]].forEach(([pt,e])=>{
+      const k=bk(pt); if(!idx.has(k)) idx.set(k,[]); idx.get(k).push({li,e}); });
+  }
+  for(let i=0;i<lines.length;i++) addEnds(i);
+  function near(pt){ const out=[]; const bx=q(pt[0]),by=q(pt[1]);
+    for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++){const a=idx.get((bx+dx)+","+(by+dy)); if(a)for(const r of a)out.push(r);}
+    return out; }
+  const within=(a,b)=>Math.hypot(a[0]-b[0],a[1]-b[1])<=tol;
+  const out=[];
+  for(let i=0;i<lines.length;i++){
+    if(used[i]) continue; used[i]=true;
+    let chain=lines[i];
+    let go=true;
+    while(go){ go=false; const tail=chain[chain.length-1];
+      for(const c of near(tail)){ if(used[c.li]) continue;
+        const o=lines[c.li], op=c.e===0?o[0]:o[o.length-1];
+        if(within(op,tail)){ used[c.li]=true; const seg=c.e===0?o:o.slice().reverse();
+          for(let k=1;k<seg.length;k++) chain.push(seg[k]); go=true; break; } } }
+    go=true;
+    while(go){ go=false; const head=chain[0];
+      for(const c of near(head)){ if(used[c.li]) continue;
+        const o=lines[c.li], op=c.e===0?o[0]:o[o.length-1];
+        if(within(op,head)){ used[c.li]=true; const seg=c.e===0?o.slice().reverse():o;
+          for(let k=seg.length-2;k>=0;k--) chain.unshift(seg[k]); go=true; break; } } }
+    out.push(chain);
+  }
+  return out;
+}
+function orderLines(lines,start){
+  if(lines.length>6000) return lines;     // safety: skip O(n^2) sort on huge sets
+  const used=new Array(lines.length).fill(false), out=[];
+  let cur=start?start.slice():[0,0];
+  for(let n=0;n<lines.length;n++){
+    let best=-1,rev=false,bd=Infinity;
+    for(let i=0;i<lines.length;i++){ if(used[i]) continue;
+      const a=lines[i][0], b=lines[i][lines[i].length-1];
+      const da=Math.hypot(a[0]-cur[0],a[1]-cur[1]); if(da<bd){bd=da;best=i;rev=false;}
+      const db=Math.hypot(b[0]-cur[0],b[1]-cur[1]); if(db<bd){bd=db;best=i;rev=true;} }
+    if(best<0) break; used[best]=true;
+    const line=rev?lines[best].slice().reverse():lines[best];
+    out.push(line); cur=line[line.length-1];
+  }
+  return out;
+}
+function planStrokes(sets){
+  if(!($("optPaths")&&$("optPaths").checked)) return sets;
+  const before=sets.length;
+  const merged=mergeLines(sets,0.6);
+  const ordered=orderLines(merged,[0,0]);
+  if(merged.length<before) log(`planned: merged ${before}→${merged.length} strokes, ordered to flow`,"sys");
+  else log(`planned: ${ordered.length} strokes ordered to flow`,"sys");
+  return ordered;
+}
+
 async function moveAbs(x,y,speed){
   // absolute CoreXY motor targets (m1=x+y, m2=x-y) → step deltas, paced by head travel time
   const spmm=+$("stepsPerMm").value||80;
@@ -467,7 +536,7 @@ async function penTo(down){
 }
 async function plotSets(rawSets,label){
   if(plotting){ log("already plotting","er"); return; }
-  const sets = orientSets(rawSets).map(pl=>pl).filter(pl=>pl.length>=2);
+  const sets = planStrokes(orientSets(rawSets).filter(pl=>pl.length>=2));
   const bb=bbox(sets);
   const lim=limitBox();
   if(bb.min[0]<-0.01||bb.min[1]<-0.01||bb.max[0]>lim[0]+0.01||bb.max[1]>lim[1]+0.01){
@@ -645,20 +714,23 @@ async function paintSets(rawSets, well, opts){
   opts=opts||{}; const dips=opts.dips!==false;
   if(plotting){ log("busy","er"); return; }
   if(dips && !well){ log("no paint well — capture/select one first","er"); return; }
-  const sets=orientSets(rawSets).filter(p=>p.length>=2);
+  const sets=(opts.plan===false?orientSets(rawSets).filter(p=>p.length>=2):planStrokes(orientSets(rawSets).filter(p=>p.length>=2)));
   if(!sets.length){ log("nothing to paint","er"); return; }
   const bb=bbox(sets);
   const lim=limitBox();
   if(bb.min[0]<-0.01||bb.min[1]<-0.01||bb.max[0]>lim[0]+0.01||bb.max[1]>lim[1]+0.01){
     log(`REJECTED: artwork to [${bb.max.map(n=>n.toFixed(0))}] mm exceeds the ${lim[0].toFixed(0)}×${lim[1].toFixed(0)} mm ${paperMm()?"paper":"bed"}`,"er"); return; }
   const paper=+$("penDownPct").value, refill=Math.max(5,+$("refillDist").value), rinseN=+$("rinseEveryN").value||0;
+  const lenVar=Math.max(0,Math.min(95,+($("lenVar")||{}).value||0))/100;   // refill-distance jitter → variable stroke length/opacity
+  const pickRefill=()=>refill*(1+(Math.random()*2-1)*lenVar);
+  let nextRefill=pickRefill();
   await sendCmd("SC,4,"+rawForPct(+$("penUpPct").value)); await sendCmd("EM,1,1");
   plotting=true; plotAbort=false; plotPaused=false; paintBusyUI(true); distSinceDip=0;
   let nseg=0, strokes=0, total=sets.reduce((s,p)=>s+p.length-1,0);
   const pausecheck=async()=>{ while(plotPaused&&!plotAbort) await sleep(120); if(plotAbort) throw new Error("aborted"); };
   try{
     await raise();
-    if(dips) await doDip(well);                     // initial brush load
+    if(dips){ await doDip(well); nextRefill=pickRefill(); }   // initial brush load
     for(let i=0;i<sets.length;i++){
       const pl=sets[i];
       await raise(); await moveAbs(pl[0][0],pl[0][1],TRAVEL()); await lower(paper);
@@ -666,14 +738,15 @@ async function paintSets(rawSets, well, opts){
         const A=pl[j-1], B=pl[j], segLen=Math.hypot(B[0]-A[0],B[1]-A[1]);
         if(segLen<1e-6) continue;
         let drawn=0;
-        while(drawn < segLen-1e-6){               // walk the segment, dipping every `refill` mm of drawn ink
+        while(drawn < segLen-1e-6){               // walk the segment, re-dip once this charge is spent (variable distance)
           await pausecheck();
-          if(dips && distSinceDip >= refill-1e-6){
+          if(dips && distSinceDip >= nextRefill-1e-6){
             const f=drawn/segLen, cx=A[0]+(B[0]-A[0])*f, cy=A[1]+(B[1]-A[1])*f;
             await raise(); await doDip(well);       // doDip resets distSinceDip
+            nextRefill=pickRefill();
             await moveAbs(cx,cy,TRAVEL()); await lower(paper);   // resume at the same point = overlap
           }
-          const budget = dips ? (refill-distSinceDip) : (segLen-drawn);
+          const budget = dips ? (nextRefill-distSinceDip) : (segLen-drawn);
           const step = Math.min(budget, segLen-drawn);
           drawn += step;
           const f=drawn/segLen;
@@ -683,7 +756,7 @@ async function paintSets(rawSets, well, opts){
         }
       }
       await raise(); strokes++;
-      if(dips && rinseN>0 && strokes%rinseN===0){ await doWater(); await doDip(well); }
+      if(dips && rinseN>0 && strokes%rinseN===0){ await doWater(); await doDip(well); nextRefill=pickRefill(); }
     }
     await raise();
     if($("homeWhenDone").checked) await moveAbs(0,0,TRAVEL());
@@ -711,7 +784,10 @@ function limitBox(){ const p=paperMm(); if(p && p.w<=MACHINE.areaMm[0]+1 && p.h<
 function computeScale(ex){
   const mode=($("scaleMode")||{}).value||"actual", m=+$("plotMargin").value||0;
   if(mode==="actual"){ if(ex.mmPerUnit) return ex.mmPerUnit;
-    log("SVG has no real-world size (width has no mm/cm/in). Set Paper size in the generator, or pick a Fit scale mode.","er"); return null; }
+    // no real-world mm in the SVG: instead of bailing silently, fall back to fit (paper if set, else bed)
+    const fb=paperMm()?[paperMm().w,paperMm().h]:MACHINE.areaMm;
+    log(`SVG has no real-world size (width has no mm/cm/in) — falling back to fit-to-${paperMm()?"paper":"bed"}. Set Paper size or an mm width in the generator for exact scale.`,"er");
+    return Math.min((fb[0]-2*m)/ex.W,(fb[1]-2*m)/ex.H); }
   const box=(mode==="paper" && paperMm()) ? [paperMm().w,paperMm().h] : MACHINE.areaMm;
   return Math.min((box[0]-2*m)/ex.W,(box[1]-2*m)/ex.H);
 }
@@ -766,8 +842,13 @@ $("scanColors").onclick=()=>{ const t=$("svgText").value.trim(); if(!t)return; c
     c.appendChild(r); });
   c.querySelectorAll("select").forEach(sel=>{ stations.forEach((s,i)=>{ if(s.type==="paint"){ const o=document.createElement("option"); o.value=i; o.textContent=s.label; sel.appendChild(o);} }); });
   log(Object.keys(byc).length+" colours found — assign wells, then 'Paint SVG by colour'","sys"); };
-$("paintSvgColor").onclick=async()=>{ const t=$("svgText").value.trim(); if(!t)return; const ex=extractColored(t); if(!ex)return;
-  const sc=computeScale(ex); if(sc==null)return; const map={};
+$("paintSvgColor").onclick=async()=>{ const t=$("svgText").value.trim();
+  if(!t){ log("Paint by colour: paste or load an SVG first","er"); return; }
+  if(!port){ log("Paint by colour: not connected — click 'Connect USB…' first","er"); return; }
+  const ex=extractColored(t); if(!ex)return;
+  if(!$("colorMap").querySelector("select")){ log("no colours scanned yet — scanning now…","sys"); $("scanColors").onclick(); } // auto-scan so wells default to the active well
+  const sc=computeScale(ex); if(sc==null){ log("Paint by colour: cannot determine scale — set Paper size or a Fit scale mode","er"); return; }
+  const map={};
   $("colorMap").querySelectorAll("select").forEach(sel=>map[sel.dataset.col]=+sel.value);
   const groups={}; ex.items.forEach(it=>{ (groups[it.color]=groups[it.color]||[]).push(it.pl.map(([x,y])=>[x*sc,y*sc])); });
   const cols=Object.keys(groups);
