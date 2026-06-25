@@ -163,6 +163,7 @@
       <button id="plotSquare" disabled title="50mm square + diagonal + 10mm tick near origin — confirms direction, scale, and pen in one go">▶ Plot test square (do this first)</button>
       <button id="plotPause" disabled>Pause</button>
       <button id="plotResume" disabled>Resume</button>
+      <button id="resumeStop" disabled title="Continue a plot/paint that you STOPPED, from the stroke where it stopped (does not re-home — leave the paper and origin untouched)">▶ Resume from stop</button>
       <span id="plotStatus" class="val" style="min-width:160px;text-align:left"></span>
     </div>
     <h2 style="margin-top:14px">Plot an SVG</h2>
@@ -473,6 +474,11 @@ $("jHome").onclick=async ()=>{
    Smooth look-ahead planning is a later upgrade. */
 let plotting=false, plotPaused=false, plotAbort=false;
 let posX=0, posY=0, accM1=0, accM2=0;   // mm position from origin + committed motor steps
+// resume-after-STOP: a job stores a closure that continues from where it stopped
+let resumeJob=null;
+function armResume(fn,msg){ resumeJob=fn; const b=$("resumeStop"); if(b) b.disabled=false;
+  log((msg||"Stopped")+" — press 'Resume from stop' to continue from here (don't move the paper).","sys"); }
+function clearResume(){ resumeJob=null; const b=$("resumeStop"); if(b) b.disabled=true; }
 
 function orientSets(sets){
   // apply Invert X / Invert Y / Swap, then translate so the design sits at +margin on the bed
@@ -579,7 +585,8 @@ async function penTo(down){
   await sendCmd(down?"SP,0":"SP,1");
   await sleep(down?420:260);   // let the servo settle before moving
 }
-async function plotSets(rawSets,label){
+async function plotSets(rawSets,label,startAt){
+  startAt=startAt|0;
   if(plotting){ log("already plotting","er"); return; }
   if(!requireConn()) return;
   const sets = planStrokes(orientSets(rawSets).filter(pl=>pl.length>=2));
@@ -589,26 +596,27 @@ async function plotSets(rawSets,label){
     log(`REJECTED: ${label} to [${bb.max.map(n=>n.toFixed(0))}] mm exceeds the ${lim[0].toFixed(0)}×${lim[1].toFixed(0)} mm ${paperMm()?"paper":"bed"}. Reduce size/margin or reposition.`,"er");
     return;
   }
+  if(startAt<=0) clearResume();
   // configure pen heights (honours the Invert up/down toggle)
   await sendCmd("SC,4,"+rawForPct(+$("penUpPct").value));
   await sendCmd("SC,5,"+rawForPct(+$("penDownPct").value));
   await sendCmd("EM,1,1");               // motors on
-  await sendCmd("CS");                    // zero EBB step counters = origin here
-  posX=posY=accM1=accM2=0;
+  if(startAt<=0){ await sendCmd("CS"); posX=posY=accM1=accM2=0; }   // zero origin only on a FRESH start (resume keeps the frame)
   plotting=true; plotAbort=false; plotPaused=false;
   $("plotPause").disabled=false; $("plotSquare").disabled=true; $("plotSvg").disabled=true;
-  log(`plotting ${label}: ${sets.length} paths, bbox ${bb.max[0].toFixed(0)}×${bb.max[1].toFixed(0)} mm`,"sys");
-  let nseg=0, total=sets.reduce((s,pl)=>s+pl.length-1,0);
+  log(`plotting ${label}: ${sets.length} paths${startAt>0?" (resuming at "+(startAt+1)+")":""}, bbox ${bb.max[0].toFixed(0)}×${bb.max[1].toFixed(0)} mm`,"sys");
+  let nseg=0, total=sets.reduce((s,pl)=>s+pl.length-1,0), curi=startAt;
   try{
     await penTo(false);
-    for(let i=0;i<sets.length;i++){
+    for(let i=startAt;i<sets.length;i++){
+      curi=i;
       const pl=sets[i];
       await penTo(false);
       await emitMove(pl[0][0],pl[0][1],false);   // travel to start, pen up
       await penTo(true);
       for(let j=1;j<pl.length;j++){
         while(plotPaused && !plotAbort){ await sleep(120); }
-        if(plotAbort) throw new Error("aborted");
+        if(plotAbort) throw new Error("stopped");
         await emitMove(pl[j][0],pl[j][1],true);
         nseg++; $("plotStatus").textContent=`${nseg}/${total} segs · path ${i+1}/${sets.length}`;
       }
@@ -617,12 +625,14 @@ async function plotSets(rawSets,label){
     await penTo(false);
     if($("homeWhenDone").checked){ await emitMove(0,0,false); log("returned to origin (0,0)","sys"); }
     log(`done: ${label} (${nseg} segments)`,"sys");
+    clearResume();
   }catch(e){
-    log("plot stopped: "+e.message,"er");
     try{ await penTo(false); }catch(_){}
+    if(plotAbort) armResume(()=>plotSets(rawSets,label,curi), `Plot STOPPED at path ${curi+1}/${sets.length}`);
+    else { log("plot error: "+e.message,"er"); clearResume(); }
   }finally{
     plotting=false; $("plotPause").disabled=true; $("plotResume").disabled=true;
-    $("plotSquare").disabled=!port; $("plotSvg").disabled=!port;
+    $("plotSquare").disabled=false; $("plotSvg").disabled=false;
   }
 }
 
@@ -690,6 +700,10 @@ $("svgFile").onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new Fil
 $("plotSvg").onclick=()=>{const t=$("svgText").value.trim();if(!t){log("paste or load an SVG first","er");return;}const s=svgToSets(t);if(s)plotSets(s,"SVG");};
 $("plotPause").onclick=()=>{plotPaused=true;$("plotResume").disabled=false;$("plotPause").disabled=true;log("paused (servo holds; press Resume)","sys");};
 $("plotResume").onclick=()=>{plotPaused=false;$("plotResume").disabled=true;$("plotPause").disabled=false;log("resumed","sys");};
+$("resumeStop").onclick=()=>{ if(!resumeJob){ log("nothing to resume","sys"); return; }
+  if(!requireConn()) return; if(plotting){ log("already running","er"); return; }
+  const j=resumeJob; resumeJob=null; $("resumeStop").disabled=true; plotAbort=false;
+  log("resuming from where you stopped…","sys"); j(); };
 // fold plot-abort into the existing STOP button
 const _origStop=$("stopBtn").onclick;
 $("stopBtn").onclick=async (e)=>{ plotAbort=true; plotPaused=false; await _origStop(e); };
@@ -765,28 +779,30 @@ async function doWater(){
 
 // --- core paint loop (dips:false → plain draw, used for calibration) ---
 async function paintSets(rawSets, well, opts){
-  opts=opts||{}; const dips=opts.dips!==false;
-  if(plotting){ log("busy","er"); return; }
-  if(!requireConn()) return;
-  if(dips && !well){ log("no paint well — capture/select one first","er"); return; }
+  opts=opts||{}; const dips=opts.dips!==false; const startAt=opts.startAt|0;
+  if(plotting){ log("busy — STOP the current run first","er"); return {stopped:true}; }
+  if(!requireConn()) return {stopped:true};
+  if(dips && !well){ log("no paint well — capture/select one first","er"); return {stopped:true}; }
   const sets=(opts.plan===false?orientSets(rawSets).filter(p=>p.length>=2):planStrokes(orientSets(rawSets).filter(p=>p.length>=2)));
-  if(!sets.length){ log("nothing to paint","er"); return; }
+  if(!sets.length){ log("nothing to paint","er"); return {done:true}; }
   const bb=bbox(sets);
   const lim=limitBox();
   if(bb.min[0]<-0.01||bb.min[1]<-0.01||bb.max[0]>lim[0]+0.01||bb.max[1]>lim[1]+0.01){
-    log(`REJECTED: artwork to [${bb.max.map(n=>n.toFixed(0))}] mm exceeds the ${lim[0].toFixed(0)}×${lim[1].toFixed(0)} mm ${paperMm()?"paper":"bed"}`,"er"); return; }
+    log(`REJECTED: artwork to [${bb.max.map(n=>n.toFixed(0))}] mm exceeds the ${lim[0].toFixed(0)}×${lim[1].toFixed(0)} mm ${paperMm()?"paper":"bed"}`,"er"); return {stopped:true}; }
+  if(startAt<=0 && !opts.resumeBuilder) clearResume();
   const paper=+$("penDownPct").value, refill=Math.max(5,+$("refillDist").value), rinseN=+$("rinseEveryN").value||0;
   const lenVar=Math.max(0,Math.min(95,+($("lenVar")||{}).value||0))/100;   // refill-distance jitter → variable stroke length/opacity
   const pickRefill=()=>refill*(1+(Math.random()*2-1)*lenVar);
   let nextRefill=pickRefill();
   await sendCmd("SC,4,"+rawForPct(+$("penUpPct").value)); await sendCmd("EM,1,1");
   plotting=true; plotAbort=false; plotPaused=false; paintBusyUI(true); distSinceDip=0;
-  let nseg=0, strokes=0, total=sets.reduce((s,p)=>s+p.length-1,0);
-  const pausecheck=async()=>{ while(plotPaused&&!plotAbort) await sleep(120); if(plotAbort) throw new Error("aborted"); };
+  let nseg=0, strokes=0, total=sets.reduce((s,p)=>s+p.length-1,0), curi=startAt;
+  const pausecheck=async()=>{ while(plotPaused&&!plotAbort) await sleep(120); if(plotAbort) throw new Error("stopped"); };
   try{
     await raise();
     if(dips){ await doDip(well); nextRefill=pickRefill(); }   // initial brush load
-    for(let i=0;i<sets.length;i++){
+    for(let i=startAt;i<sets.length;i++){
+      curi=i;
       const pl=sets[i];
       await raise(); await moveAbs(pl[0][0],pl[0][1],TRAVEL()); await lower(paper);
       for(let j=1;j<pl.length;j++){
@@ -816,7 +832,14 @@ async function paintSets(rawSets, well, opts){
     await raise();
     if($("homeWhenDone").checked) await moveAbs(0,0,TRAVEL());
     log(`paint done (${nseg} segs, ${strokes} strokes)`,"sys");
-  }catch(e){ log("paint stopped: "+e.message,"er"); try{ await raise(); }catch(_){}
+    if(!opts.resumeBuilder) clearResume();
+    return {done:true};
+  }catch(e){ try{ await raise(); }catch(_){}
+    if(plotAbort){
+      const builder = opts.resumeBuilder ? opts.resumeBuilder(curi) : (()=>paintSets(rawSets,well,Object.assign({},opts,{startAt:curi})));
+      armResume(builder, `Paint STOPPED at stroke ${curi+1}/${sets.length}`);
+    } else { log("paint error: "+e.message,"er"); if(!opts.resumeBuilder) clearResume(); }
+    return {stopped:true};
   }finally{ plotting=false; paintBusyUI(false); }
 }
 function paintBusyUI(on){ $("plotPause").disabled=!on;
@@ -899,22 +922,41 @@ $("scanColors").onclick=()=>{ const t=$("svgText").value.trim();
     c.appendChild(r); });
   c.querySelectorAll("select").forEach(sel=>{ stations.forEach((s,i)=>{ if(s.type==="paint"){ const o=document.createElement("option"); o.value=i; o.textContent=s.label; sel.appendChild(o);} }); });
   log(Object.keys(byc).length+" colours found — assign wells, then 'Paint SVG by colour'","sys"); };
-$("paintSvgColor").onclick=async()=>{ const t=$("svgText").value.trim();
-  if(!t){ log("Paint by colour: paste or load an SVG first","er"); alert("Paste or load an SVG into the box first (under “Plot an SVG”)."); return; }
+// resumable multi-colour driver: paints colour ci from path startPath, water-cleans between colours
+async function paintColorRun(groups,cols,map,startCol,startPath){
+  plotAbort=false;                       // entering or resuming clears any earlier STOP
+  for(let ci=startCol; ci<cols.length; ci++){
+    const well=stations[map[cols[ci]]]||activeWellObj();
+    log(`colour ${ci+1}/${cols.length}: ${cols[ci]} → ${well?well.label:"?"}`,"sys");
+    const sp=(ci===startCol)?(startPath|0):0;
+    const res=await paintSets(groups[cols[ci]], well, {dips:true, startAt:sp,
+      resumeBuilder:(p)=>()=>paintColorRun(groups,cols,map,ci,p)});
+    if(res&&res.stopped) return;          // paintSets already armed the resume
+    if(ci<cols.length-1){
+      if(plotAbort){ armResume(()=>paintColorRun(groups,cols,map,ci+1,0),`Stopped before colour ${ci+2}/${cols.length}`); return; }
+      await doWater();                    // clean between colours
+      if(plotAbort){ armResume(()=>paintColorRun(groups,cols,map,ci+1,0),`Stopped before colour ${ci+2}/${cols.length}`); return; }
+    }
+  }
+  clearResume();
+  log(`paint by colour: all ${cols.length} colours done`,"sys");
+}
+$("paintSvgColor").onclick=async()=>{
+  log("Paint by colour: clicked","sys");                       // always-on feedback so a click is never silent
+  const t=$("svgText").value.trim();
+  if(!t){ log("Paint by colour: the SVG box is empty — paste or load an SVG first","er"); alert("Paste or load an SVG into the box first (under “Plot an SVG”)."); return; }
   if(!requireConn()) return;
+  if(plotting){ log("already running — press STOP first","er"); return; }
   const ex=extractColored(t); if(!ex){ alert("No plottable shapes found in that SVG."); return; }
   if(!$("colorMap").querySelector("select")){ log("no colours scanned yet — scanning now…","sys"); $("scanColors").onclick(); } // auto-scan so wells default to the active well
-  const sc=computeScale(ex); if(sc==null){ log("Paint by colour: cannot determine scale — set Paper size or a Fit scale mode","er"); return; }
+  const sc=computeScale(ex); if(sc==null){ log("Paint by colour: cannot determine scale — set Paper size or a Fit scale mode","er"); alert("Cannot determine size. Set a Paper size or pick a Fit scale mode."); return; }
   const map={};
   $("colorMap").querySelectorAll("select").forEach(sel=>map[sel.dataset.col]=+sel.value);
   const groups={}; ex.items.forEach(it=>{ (groups[it.color]=groups[it.color]||[]).push(it.pl.map(([x,y])=>[x*sc,y*sc])); });
   const cols=Object.keys(groups);
-  for(let ci=0;ci<cols.length;ci++){ if(plotAbort)break;
-    const well=stations[map[cols[ci]]]||activeWellObj();
-    log(`colour ${ci+1}/${cols.length}: ${cols[ci]} → ${well?well.label:"?"}`,"sys");
-    await paintSets(groups[cols[ci]], well, {dips:true});
-    if(ci<cols.length-1 && !plotAbort) await doWater();   // clean between colours
-  }
+  log(`Paint by colour: ${cols.length} colour layer(s), starting…`,"sys");
+  clearResume();
+  paintColorRun(groups,cols,map,0,0);
 };
 
 log("Ready. Click 'Connect USB…', pick the iDraw, and it will auto-detect.","sys");
