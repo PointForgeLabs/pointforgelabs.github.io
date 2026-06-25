@@ -87,16 +87,29 @@
     </div>
 
     <!-- Brush height (Z) -->
-    <h2 style="margin-top:14px">Brush height (Z servo)</h2>
+    <h2 style="margin-top:14px">Brush heights — UP for travel, DOWN for painting</h2>
     <div class="row">
-      <input id="zRange" type="range" min="0" max="100" value="40" disabled>
+      <label class="f" style="min-width:118px">▲ Travel / UP</label>
+      <input id="zUp" type="range" min="0" max="100" value="100" disabled>
+      <span id="zUpVal" class="val">100%</span>
+      <button id="testUp" disabled title="Move the brush to the travel height now so you can see it">Test ▲ raise</button>
+    </div>
+    <div class="row">
+      <label class="f" style="min-width:118px">▼ Paint / DOWN</label>
+      <input id="zDown" type="range" min="0" max="100" value="0" disabled>
+      <span id="zDownVal" class="val">0%</span>
+      <button id="testDown" disabled title="Move the brush to the paint height now so you can see it">Test ▼ lower</button>
+    </div>
+    <div class="row">
+      <label class="f"><input type="checkbox" id="zInvert"> Invert (tick this if <b>Test ▲ raise</b> actually lowers the brush)</label>
+    </div>
+    <p class="hint"><b>You don't need to understand the servo commands.</b> Just drag each slider to its extreme and press the Test button to watch the brush: set <b>▲ Travel / UP</b> so the brush lifts fully clear of the paper, and <b>▼ Paint / DOWN</b> so it presses onto the paper (lower = wider, wetter mark). The plotter uses these two heights for every plot and paint automatically — raised while moving between strokes, lowered while drawing. Defaults are already at the extremes (UP=100, DOWN=0); if raise/lower come out backwards, tick Invert. <span id="zUnits" class="sys"></span></p>
+    <!-- legacy single-height calibrator (kept for fine paint-depth tuning by feel) -->
+    <div class="row" style="display:none">
+      <input id="zRange" type="range" min="0" max="100" value="40">
       <span id="zVal" class="val">40%</span>
-      <button id="zApply" disabled>Set down-height &amp; lower</button>
+      <button id="zApply">Set down-height &amp; lower</button>
     </div>
-    <div class="row">
-      <label class="f"><input type="checkbox" id="zInvert"> Invert up/down (flip if Pen UP lowers the brush)</label>
-    </div>
-    <p class="hint">Lowering the brush further (higher %) splays the bristles = wider, wetter mark. Find your paper-touch and well-bottom heights here — these become the calibration the painting engine needs. <span id="zUnits" class="sys"></span></p>
 
     <!-- Jog -->
     <h2 style="margin-top:14px">Jog</h2>
@@ -129,8 +142,8 @@
     <div class="row">
       <label class="f">Draw speed <input id="drawSpeed" type="number" value="25" min="2" max="120"> mm/s</label>
       <label class="f">Travel speed <input id="travelSpeed" type="number" value="70" min="5" max="200"> mm/s</label>
-      <label class="f">Pen-up % <input id="penUpPct" type="number" value="5" min="0" max="100"></label>
-      <label class="f">Pen-down % <input id="penDownPct" type="number" value="45" min="0" max="100"></label>
+      <span class="sys" title="Set these with the Travel/Paint sliders in Manual control">Brush heights set above ▲▼</span>
+      <input id="penUpPct" type="hidden" value="0"><input id="penDownPct" type="hidden" value="100">
       <label class="f">Margin <input id="plotMargin" type="number" value="15" min="0" max="100"> mm</label>
     </div>
     <div class="row">
@@ -347,9 +360,9 @@ const Z_MIN=9855, Z_MAX=27831;       // 0%..100% of the documented pen band
 // height% convention: higher % = brush LOWER (more pressed). Invert flips polarity for machines wired the other way.
 function rawForPct(p){ const q = $("zInvert").checked ? (100-p) : p; return Math.round(Z_MIN + (Z_MAX-Z_MIN)*q/100); }
 async function ebbInit(){
-  await sendCmd("SC,4,"+rawForPct(5));    // pen-up position (raised)
-  await sendCmd("SC,5,"+rawForPct(45));   // pen-down position (default touch)
-  log("EBB servo band set (up≈raised, down≈45%)"+($("zInvert").checked?" [inverted]":"")+" — calibrate with the slider","sys");
+  await sendCmd("SC,4,"+rawForPct(+$("penUpPct").value));    // pen-up = Travel height
+  await sendCmd("SC,5,"+rawForPct(+$("penDownPct").value));  // pen-down = Paint height
+  log("EBB brush heights set (Travel UP="+$("zUp").value+"%, Paint DOWN="+$("zDown").value+"%)"+($("zInvert").checked?" [inverted]":"")+" — press Test ▲/▼ to confirm direction","sys");
   $("zUnits").textContent = `(raw band ${Z_MIN}–${Z_MAX})`;
 }
 $("zInvert").onchange = ()=>{ log("Z invert "+($("zInvert").checked?"ON":"OFF"),"sys"); if(ctype==="ebb" && port) ebbInit(); };
@@ -371,7 +384,7 @@ function setType(t){
   $("grblExtra").style.display = t==="grbl"?"flex":"none";
 }
 function enableControls(on){
-  ["motorsOn","motorsOff","penUp","penDown","zRange","zApply",
+  ["motorsOn","motorsOff","penUp","penDown","zUp","zDown","testUp","testDown","zRange","zApply",
    "jYp","jYm","jXp","jXm","jHome"].forEach(id=>$(id).disabled=!on);
 }
 
@@ -390,18 +403,40 @@ $("stopBtn").onclick = async ()=>{
 $("motorsOn").onclick = ()=> ctype==="grbl" ? sendCmd("$X") : sendCmd("EM,1,1");
 $("motorsOff").onclick = ()=> ctype==="grbl" ? sendCmd("$SLP") : sendCmd("EM,0,0");
 
-/* ---------- pen / brush up-down ---------- */
-$("penUp").onclick = ()=> ctype==="grbl" ? sendCmd($("grblUp").value) : sendCmd("SP,1");
-$("penDown").onclick = ()=> ctype==="grbl" ? sendCmd($("grblDown").value) : sendCmd("SP,0");
+/* ---------- brush heights: two sliders (UP for travel, DOWN for painting) ----------
+   The friendly sliders drive the two hidden press% values the plot/paint engine reads.
+   Slider 100 = highest, 0 = lowest. penUpPct/penDownPct store "press %" = 100 - height. */
+function syncHeights(){ $("penUpPct").value = 100-(+$("zUp").value); $("penDownPct").value = 100-(+$("zDown").value);
+  $("zUpVal").textContent=$("zUp").value+"%"; $("zDownVal").textContent=$("zDown").value+"%"; }
+async function applyUp(){   // raise to the travel height (and make it the pen-UP position)
+  if(!port) return;
+  if(ctype==="grbl"){ await sendCmd($("grblUp").value); return; }
+  await sendCmd("SC,4,"+rawForPct(+$("penUpPct").value)); await sendCmd("SP,1");
+  log(`brush at TRAVEL height (UP ${$("zUp").value}%)`,"sys"); }
+async function applyDown(){ // lower to the paint height (and make it the pen-DOWN position)
+  if(!port) return;
+  if(ctype==="grbl"){ await sendCmd($("grblDown").value); return; }
+  await sendCmd("SC,5,"+rawForPct(+$("penDownPct").value)); await sendCmd("SP,0");
+  log(`brush at PAINT height (DOWN ${$("zDown").value}%)`,"sys"); }
 
-/* ---------- brush height slider ---------- */
+/* ---------- pen / brush up-down (use the configured heights) ---------- */
+$("penUp").onclick = ()=> applyUp();
+$("penDown").onclick = ()=> applyDown();
+$("testUp").onclick = ()=> applyUp();
+$("testDown").onclick = ()=> applyDown();
+$("zUp").addEventListener("input", syncHeights);
+$("zDown").addEventListener("input", syncHeights);
+$("zUp").addEventListener("change", ()=>{ if(ctype==="ebb"&&port) applyUp(); });   // release slider = move so you can see it
+$("zDown").addEventListener("change", ()=>{ if(ctype==="ebb"&&port) applyDown(); });
+syncHeights();   // initialise the hidden press% from the slider defaults at load
+
+/* ---------- legacy single-height calibrator (hidden; kept so old handlers don't break) ---------- */
 $("zRange").addEventListener("input", e=>{ $("zVal").textContent = e.target.value+"%"; });
 $("zApply").onclick = async ()=>{
   const p=+$("zRange").value;
   if(ctype==="grbl"){ log("On GRBL, brush height depends on firmware — edit the pen-down command (e.g. M3 Sxxx).","sys"); return; }
-  await sendCmd("SC,5,"+rawForPct(p));   // set pen-down position
-  await sendCmd("SP,0");                  // lower to it
-  log(`brush set to ${p}% (raw ${zPctToRaw(p)}) and lowered`,"sys");
+  await sendCmd("SC,5,"+rawForPct(p)); await sendCmd("SP,0");
+  log(`brush set to ${p}% and lowered`,"sys");
 };
 
 /* ---------- jog ----------
@@ -546,6 +581,7 @@ async function penTo(down){
 }
 async function plotSets(rawSets,label){
   if(plotting){ log("already plotting","er"); return; }
+  if(!requireConn()) return;
   const sets = planStrokes(orientSets(rawSets).filter(pl=>pl.length>=2));
   const bb=bbox(sets);
   const lim=limitBox();
@@ -658,10 +694,18 @@ $("plotResume").onclick=()=>{plotPaused=false;$("plotResume").disabled=true;$("p
 const _origStop=$("stopBtn").onclick;
 $("stopBtn").onclick=async (e)=>{ plotAbort=true; plotPaused=false; await _origStop(e); };
 // enable plot buttons with connection
+const ACTION_BTNS=["plotSquare","plotSvg","calibLine","paintZig","paintSvgWell","scanColors","paintSvgColor"];
 const _origEnable=enableControls;
+// Keep the plot/paint action buttons ALWAYS clickable (even when disconnected) so they can tell
+// you why nothing happened instead of being dead grey buttons. Each guards itself via requireConn().
 enableControls=function(on){ _origEnable(on);
-  ["plotSquare","plotSvg","calibLine","paintZig","paintSvgWell","scanColors","paintSvgColor"].forEach(id=>{const e=$(id);if(e)e.disabled=!on;});
+  ACTION_BTNS.forEach(id=>{const e=$(id);if(e)e.disabled=false;});
   if(!on){plotAbort=true;} };
+ACTION_BTNS.forEach(id=>{const e=$(id);if(e)e.disabled=false;});   // enable now, before any connection
+function requireConn(){ if(port) return true;
+  log("Not connected — click 'Connect USB…' (top-right) first.","er");
+  alert("Not connected to the iDraw.\n\nClick “Connect USB…” at the top-right, pick the plotter, then try again.");
+  return false; }
 
 /* ============================ PAINT ENGINE (stage 3, EBB) ============================
    Refill-distance dipping built on the stage-2 motion core. Splits strokes so the brush
@@ -723,6 +767,7 @@ async function doWater(){
 async function paintSets(rawSets, well, opts){
   opts=opts||{}; const dips=opts.dips!==false;
   if(plotting){ log("busy","er"); return; }
+  if(!requireConn()) return;
   if(dips && !well){ log("no paint well — capture/select one first","er"); return; }
   const sets=(opts.plan===false?orientSets(rawSets).filter(p=>p.length>=2):planStrokes(orientSets(rawSets).filter(p=>p.length>=2)));
   if(!sets.length){ log("nothing to paint","er"); return; }
@@ -775,7 +820,7 @@ async function paintSets(rawSets, well, opts){
   }finally{ plotting=false; paintBusyUI(false); }
 }
 function paintBusyUI(on){ $("plotPause").disabled=!on;
-  ["plotSquare","plotSvg","calibLine","paintZig","paintSvgWell","scanColors","paintSvgColor"].forEach(id=>{const e=$(id);if(e)e.disabled=on?true:!port;}); }
+  ACTION_BTNS.forEach(id=>{const e=$(id);if(e)e.disabled=on;}); }   // disabled only while busy; clickable otherwise
 
 // calibration line (no dips) + test zigzag (with dips)
 $("calibLine").onclick=()=>{ const len=+$("calibLen").value||200; paintSets([[[0,0],[len,0]]],null,{dips:false}); };
@@ -844,7 +889,9 @@ function extractColored(svgStr){
   if(!items.length){ log("no plottable geometry in SVG","er"); return null; }
   return {items,W,H,mmPerUnit:svgMmPerUnit(svg,W,H)};
 }
-$("scanColors").onclick=()=>{ const t=$("svgText").value.trim(); if(!t)return; const ex=extractColored(t); if(!ex)return;
+$("scanColors").onclick=()=>{ const t=$("svgText").value.trim();
+  if(!t){ log("Scan colours: paste or load an SVG first (box above)","er"); alert("Paste or load an SVG into the box first (under “Plot an SVG”)."); return; }
+  const ex=extractColored(t); if(!ex){ alert("No plottable shapes found in that SVG."); return; }
   const byc={}; ex.items.forEach(it=>byc[it.color]=(byc[it.color]||0)+1);
   const c=$("colorMap"); c.innerHTML="";
   Object.keys(byc).forEach(col=>{ const r=document.createElement("div"); r.className="row";
@@ -853,9 +900,9 @@ $("scanColors").onclick=()=>{ const t=$("svgText").value.trim(); if(!t)return; c
   c.querySelectorAll("select").forEach(sel=>{ stations.forEach((s,i)=>{ if(s.type==="paint"){ const o=document.createElement("option"); o.value=i; o.textContent=s.label; sel.appendChild(o);} }); });
   log(Object.keys(byc).length+" colours found — assign wells, then 'Paint SVG by colour'","sys"); };
 $("paintSvgColor").onclick=async()=>{ const t=$("svgText").value.trim();
-  if(!t){ log("Paint by colour: paste or load an SVG first","er"); return; }
-  if(!port){ log("Paint by colour: not connected — click 'Connect USB…' first","er"); return; }
-  const ex=extractColored(t); if(!ex)return;
+  if(!t){ log("Paint by colour: paste or load an SVG first","er"); alert("Paste or load an SVG into the box first (under “Plot an SVG”)."); return; }
+  if(!requireConn()) return;
+  const ex=extractColored(t); if(!ex){ alert("No plottable shapes found in that SVG."); return; }
   if(!$("colorMap").querySelector("select")){ log("no colours scanned yet — scanning now…","sys"); $("scanColors").onclick(); } // auto-scan so wells default to the active well
   const sc=computeScale(ex); if(sc==null){ log("Paint by colour: cannot determine scale — set Paper size or a Fit scale mode","er"); return; }
   const map={};
